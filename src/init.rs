@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::App;
 use crate::adapters::apt::{self, Apt};
+use crate::chezmoi;
 use crate::claim::{commit_and_push, parse_groups};
 use crate::cli::InitArgs;
 use crate::git::Git;
@@ -26,7 +27,7 @@ pub fn run(app: &App, args: &InitArgs) -> Result<()> {
         None => {
             let guess = local
                 .repo()
-                .or_else(|| chezmoi_repo(app))
+                .or_else(|| chezmoi::repo_root(app))
                 .unwrap_or_else(|| default_repo(app));
             if ask {
                 app.paths.expand(
@@ -194,28 +195,14 @@ fn default_repo(app: &App) -> PathBuf {
     app.paths.home.join(".local/share/chezmoi")
 }
 
-/// The git toplevel of `chezmoi source-path`, if chezmoi is installed.
-fn chezmoi_repo(app: &App) -> Option<PathBuf> {
-    if !app.runner.which("chezmoi") {
-        return None;
-    }
-    let out = app
-        .runner
-        .run(&Cmd::new("chezmoi").arg("source-path"))
-        .ok()
-        .filter(|o| o.success())?;
-    let src = PathBuf::from(out.stdout.trim());
-    Git::new(app.runner, &src).toplevel().ok().or(Some(src))
-}
-
 /// True when chezmoi reads its source state straight from the repo root, so a
 /// `packages.toml` there would otherwise become `~/packages.toml`.
 fn is_chezmoi_source_root(app: &App, repo: &Path) -> bool {
     if repo.join(".chezmoiroot").exists() {
         return false;
     }
-    if let Some(r) = chezmoi_repo(app) {
-        return same_path(&r, repo);
+    if let Some(r) = chezmoi::repo_root(app) {
+        return chezmoi::same_path(&r, repo);
     }
     fs::read_dir(repo).is_ok_and(|rd| {
         rd.flatten().any(|e| {
@@ -223,13 +210,6 @@ fn is_chezmoi_source_root(app: &App, repo: &Path) -> bool {
             n.starts_with("dot_") || n.starts_with("private_dot_") || n.starts_with(".chezmoi")
         })
     })
-}
-
-fn same_path(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
 }
 
 fn add_chezmoiignore(app: &App, repo: &Path) -> Result<bool> {

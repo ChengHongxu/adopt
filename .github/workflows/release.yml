@@ -1,0 +1,112 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag, Cargo.toml and recipe must agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          recipe=$(sed -n 's/^  version: "\(.*\)"$/\1/p' recipe/recipe.yaml | head -1)
+          echo "tag=$tag Cargo.toml=$cargo recipe=$recipe"
+          [ "$tag" = "$cargo" ] && [ "$tag" = "$recipe" ]
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: adopt-linux-amd64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: adopt-linux-arm64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: adopt-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke test
+        run: |
+          cp target/${{ matrix.target }}/release/adopt ${{ matrix.asset }}
+          ./${{ matrix.asset }} --version
+          file ${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: cd artifacts && sha256sum adopt-* > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+
+  conda-package:
+    needs: release
+    strategy:
+      matrix:
+        include:
+          - platform: linux-64
+            os: ubuntu-latest
+          - platform: linux-aarch64
+            os: ubuntu-24.04-arm
+          - platform: osx-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pixi and rattler-build
+        run: |
+          curl -fsSL https://pixi.sh/install.sh | bash
+          echo "$HOME/.pixi/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.pixi/bin:$PATH"
+          pixi global install rattler-build
+      - name: Build conda package for ${{ matrix.platform }}
+        run: rattler-build build --recipe recipe/recipe.yaml --target-platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conda-package-${{ matrix.platform }}
+          path: output/**/*.conda
+
+  trigger-channel-update:
+    needs: conda-package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CHANNEL_DISPATCH_TOKEN }}
+          repository: ChengHongxu/packages
+          event-type: add-conda-package
+          client-payload: |
+            {
+              "package": "adopt",
+              "version": "${{ steps.version.outputs.VERSION }}",
+              "run_id": "${{ github.run_id }}"
+            }

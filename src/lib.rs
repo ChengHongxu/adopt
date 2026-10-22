@@ -2,6 +2,7 @@
 
 pub mod adapters;
 pub mod apply;
+pub mod chezmoi;
 pub mod claim;
 pub mod cli;
 pub mod commit_msg;

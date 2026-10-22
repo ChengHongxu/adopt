@@ -1,0 +1,43 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  check:
+    name: fmt / clippy / test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  # Real apt / dnf4 / dnf5 in throwaway containers. Checks the parsing of their
+  # actual output and the three sync rules end to end.
+  e2e:
+    name: e2e (${{ matrix.image }})
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:stable", "fedora:latest", "rockylinux:9"]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Run in ${{ matrix.image }}
+        run: >
+          docker run --rm -v "$PWD:/src:ro" "${{ matrix.image }}"
+          sh /src/tests/e2e/run.sh /src/target/x86_64-unknown-linux-musl/release/adopt

@@ -16,6 +16,9 @@ pub fn run(app: &App, args: &SyncArgs) -> Result<()> {
         Ok(pulled) if !pulled.is_empty() => {
             ui.line(format!("↓ 拉取 {} 个提交", pulled.len()));
             s.reload_shared()?;
+            if crate::chezmoi::detect(app, &s.repo).is_some() {
+                crate::chezmoi::apply(app);
+            }
         }
         Ok(_) => {}
         Err(e) => ui.warn(format!("{e:#}\n  继续使用本地的清单")),

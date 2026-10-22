@@ -47,6 +47,8 @@ pub struct FakeSystem {
     pub dnf5: RefCell<bool>,
     /// Homebrew formulae; `leaves` is `installed`.
     pub brew: RefCell<FakePm>,
+    /// chezmoi's source dir; `None` means chezmoi is not installed.
+    pub chezmoi_source: RefCell<Option<PathBuf>>,
     /// Every non-git command run, as displayed.
     pub log: RefCell<Vec<String>>,
 }
@@ -248,6 +250,22 @@ impl CommandRunner for FakeSystem {
                 let names: Vec<String> = self.brew.borrow().installed.iter().cloned().collect();
                 Output::ok(names.iter().map(|n| format!("{n}\n")).collect::<String>())
             }
+            ("chezmoi", ["source-path"]) => match self.chezmoi_source.borrow().as_ref() {
+                Some(p) => Output::ok(format!("{}\n", p.display())),
+                None => Output::fail(127, "chezmoi: not found"),
+            },
+            ("chezmoi", ["target-path", abs]) => {
+                let src = self.chezmoi_source.borrow().clone().unwrap();
+                match Path::new(abs).strip_prefix(&src) {
+                    Ok(rel) if Path::new(abs).exists() => {
+                        let t = adopt::chezmoi::guess_target(rel);
+                        let home = self.base.join("home");
+                        Output::ok(format!("{}\n", home.join(&t[2..]).display()))
+                    }
+                    _ => Output::fail(1, "chezmoi: not in source state"),
+                }
+            }
+            ("chezmoi", ["apply", "--no-tty"]) => Output::ok(""),
             ("apt-mark", ["showmanual"]) => {
                 let mut s = String::new();
                 for n in self.apt_manual.borrow().iter() {
@@ -271,6 +289,7 @@ impl CommandRunner for FakeSystem {
             ("pixi", ["global", "sync"]) => *self.pixi_sync_code.borrow(),
             ("apt-get", a) => self.apt_get(cmd, a),
             ("sh", a) => self.sh(a),
+            ("chezmoi", ["apply"]) => 0,
             ("dnf", a) => self.dnf_cmd(cmd, a),
             ("brew", a) => self.brew_cmd(cmd, a),
             ("-v", []) if cmd.program == "sudo" => i32::from(!*self.sudo_ok.borrow()),
@@ -279,7 +298,9 @@ impl CommandRunner for FakeSystem {
     }
 
     fn which(&self, program: &str) -> bool {
-        program == "git" || self.programs.borrow().contains(program)
+        program == "git"
+            || (program == "chezmoi" && self.chezmoi_source.borrow().is_some())
+            || self.programs.borrow().contains(program)
     }
 }
 
@@ -406,6 +427,7 @@ impl Env {
             apt_repo: RefCell::default(),
             uid: RefCell::new(1000),
             sudo_ok: RefCell::new(true),
+            chezmoi_source: RefCell::new(None),
             dnf: RefCell::default(),
             dnf5: RefCell::new(true),
             brew: RefCell::default(),
@@ -492,6 +514,11 @@ impl Env {
             repo.iter().chain(manual).map(|s| s.to_string()).collect();
         drop(p);
         self.sys.touch_dpkg();
+    }
+
+    /// Install chezmoi, using the dotfiles checkout as its source dir.
+    pub fn with_chezmoi(&self) {
+        *self.sys.chezmoi_source.borrow_mut() = Some(self.repo.clone());
     }
 
     /// Make this a Fedora-like machine (dnf5 unless `v5` is false).
@@ -627,6 +654,22 @@ impl Env {
         }
         script.assert_done();
         out
+    }
+
+    /// Like [`Env::ok`], also returning every prompt shown, one per line.
+    pub fn ok_prompts(
+        &self,
+        args: &[&str],
+        answers: impl IntoIterator<Item = Answer>,
+    ) -> (String, String) {
+        let script = Script::new(answers);
+        let (r, out) = self.run(args, &script);
+        if let Err(e) = r {
+            panic!("adopt {args:?} failed: {e:#}\n--- output ---\n{out}");
+        }
+        script.assert_done();
+        let prompts = script.asked.borrow().join("\n");
+        (out, prompts)
     }
 
     /// `adopt <args>` with no terminal (systemd timer, cloud-init). Must succeed.

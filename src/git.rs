@@ -117,6 +117,38 @@ impl<'a> Git<'a> {
         Ok(Pull::Pulled(subjects.lines().map(str::to_string).collect()))
     }
 
+    /// `git status --porcelain=v1 -z`, with every untracked file listed.
+    pub fn status_z(&self) -> Result<String> {
+        self.run_ok(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+    }
+
+    /// Lines added and removed in `rel` against HEAD; `None` for binaries or errors.
+    pub fn numstat(&self, rel: &str) -> Option<(u64, u64)> {
+        let out = self
+            .run_ok(&["diff", "HEAD", "--numstat", "--", rel])
+            .ok()?;
+        let mut f = out.lines().next()?.split('\t');
+        Some((f.next()?.parse().ok()?, f.next()?.parse().ok()?))
+    }
+
+    /// The diff of `paths` against HEAD; an untracked file is shown as all new.
+    pub fn diff_text(&self, paths: &[&str], untracked: bool) -> Result<String> {
+        if untracked {
+            // Exit code 1 just means "differs".
+            let mut args = vec!["diff", "--no-color", "--no-index", "--", "/dev/null"];
+            args.extend_from_slice(paths);
+            return Ok(self.run(&args)?.stdout);
+        }
+        let mut args = vec!["diff", "--no-color", "HEAD", "--"];
+        args.extend_from_slice(paths);
+        self.run_ok(&args)
+    }
+
+    /// Throw away staged and unstaged changes to `rel` (restores deleted files too).
+    pub fn restore(&self, rel: &str) -> Result<()> {
+        self.run_ok(&["checkout", "HEAD", "--", rel]).map(drop)
+    }
+
     /// Files under `rel` that differ from HEAD (staged, unstaged or untracked).
     pub fn is_dirty(&self, rel: &str) -> Result<bool> {
         Ok(!self

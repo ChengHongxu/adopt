@@ -104,8 +104,9 @@ impl Adapter for Dnf {
             // The rpm database changes on every install/remove (new and old location).
             paths.sys("/usr/lib/sysimage/rpm/rpmdb.sqlite"),
             paths.sys("/var/lib/rpm/rpmdb.sqlite"),
-            // `dnf mark` only touches dnf's own state.
+            // dnf's own transaction history; `dnf mark` only touches these.
             paths.sys("/var/lib/dnf/history.sqlite"),
+            paths.sys("/usr/lib/sysimage/libdnf5/transaction_history.sqlite"),
             paths.sys("/usr/lib/sysimage/libdnf5/system.toml"),
         ]
     }

@@ -1,0 +1,59 @@
+schema_version: 1
+
+context:
+  version: "0.1.0"
+
+package:
+  name: adopt
+  version: ${{ version }}
+
+source:
+  # Only for LICENSE; the binary comes from the GitHub Release for this tag.
+  - git: https://github.com/ChengHongxu/adopt.git
+    tag: v${{ version }}
+
+build:
+  number: 0
+  skip:
+    - win
+  script:
+    - |
+      set -euo pipefail
+      case "${{ target_platform }}" in
+        linux-64)      asset=adopt-linux-amd64 ;;
+        linux-aarch64) asset=adopt-linux-arm64 ;;
+        osx-arm64)     asset=adopt-darwin-arm64 ;;
+        *) echo "no prebuilt adopt for ${{ target_platform }}" >&2; exit 1 ;;
+      esac
+      base=https://github.com/ChengHongxu/adopt/releases/download/v${{ version }}
+      curl -fsSL -o "$asset" "$base/$asset"
+      curl -fsSL -o SHA256SUMS "$base/SHA256SUMS"
+      grep " $asset\$" SHA256SUMS > expected.sha256
+      if command -v sha256sum >/dev/null; then sha256sum -c expected.sha256; else shasum -a 256 -c expected.sha256; fi
+      mkdir -p "$PREFIX/bin"
+      install -m 755 "$asset" "$PREFIX/bin/adopt"
+
+requirements:
+  build:
+    - curl
+
+tests:
+  - script:
+      - adopt --version
+      - adopt --help
+
+about:
+  homepage: https://github.com/ChengHongxu/adopt
+  repository: https://github.com/ChengHongxu/adopt
+  license: MIT
+  license_file: LICENSE
+  summary: Install packages natively, then adopt them into your dotfiles manifest
+  description: |
+    先用 apt / dnf / brew / pixi global 原生命令装软件，再用 adopt 一次性认领：
+    同步到所有机器、指定分组、仅本机或忽略，自动提交并推送到 dotfiles 仓库。
+    其他机器用 `adopt sync --yes` 拉取并应用。
+  documentation: https://github.com/ChengHongxu/adopt#readme
+
+extra:
+  recipe-maintainers:
+    - ChengHongxu

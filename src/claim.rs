@@ -139,10 +139,14 @@ pub fn run(app: &App) -> Result<()> {
         bail!("交互模式需要终端；非交互场景请用 `adopt sync --yes`");
     }
     let mut s = Session::open(app)?;
+    let chezmoi_src = crate::chezmoi::detect(app, &s.repo);
     let pulled = pull(app, &s.repo)?;
     if !pulled.is_empty() {
         app.ui.line(format!("↓ 拉取 {} 个提交", pulled.len()));
         s.reload_shared()?;
+        if chezmoi_src.is_some() {
+            crate::chezmoi::apply(app);
+        }
     }
 
     // First bring the machine in line with the manifests (asking before sudo)...
@@ -187,7 +191,11 @@ pub fn run(app: &App) -> Result<()> {
     claim_new(&mut s, &new)?;
     claim_missing(&mut s, &adapters, &missing)?;
     claim_drift(&mut s, &adapters, &drift)?;
-    s.finish(&[])?;
+    let mut config_paths = Vec::new();
+    if let Some(src) = &chezmoi_src {
+        crate::chezmoi::claim(&mut s, src, &mut config_paths)?;
+    }
+    s.finish(&config_paths)?;
     crate::status::refresh(app);
     Ok(())
 }
