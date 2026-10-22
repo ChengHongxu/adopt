@@ -26,6 +26,14 @@ pub struct FakeSystem {
     pub programs: RefCell<BTreeSet<String>>,
     /// Exit code for `pixi global sync`.
     pub pixi_sync_code: RefCell<i32>,
+    /// apt: what `apt-mark showmanual` reports.
+    pub apt_manual: RefCell<BTreeSet<String>>,
+    /// apt: names `apt-get install` can find. Anything else fails with 100.
+    pub apt_repo: RefCell<BTreeSet<String>>,
+    /// Output of `id -u`.
+    pub uid: RefCell<u32>,
+    /// Whether `sudo -n true` / `sudo -v` succeed.
+    pub sudo_ok: RefCell<bool>,
     /// Every non-git command run, as displayed.
     pub log: RefCell<Vec<String>>,
 }
@@ -52,6 +60,29 @@ impl FakeSystem {
         c
     }
 
+    fn apt_get(&self, cmd: &Cmd, args: &[&str]) -> i32 {
+        if cmd.program != "sudo" && *self.uid.borrow() != 0 {
+            return 100; // "are you root?"
+        }
+        let Some(pos) = args.iter().position(|a| *a == "install" || *a == "remove") else {
+            return 64;
+        };
+        let names = &args[pos + 1..];
+        if args[pos] == "install" {
+            if names.iter().any(|n| !self.apt_repo.borrow().contains(*n)) {
+                return 100; // E: Unable to locate package
+            }
+            self.apt_manual
+                .borrow_mut()
+                .extend(names.iter().map(|n| n.to_string()));
+        } else {
+            for n in names {
+                self.apt_manual.borrow_mut().remove(*n);
+            }
+        }
+        0
+    }
+
     pub fn ran(&self, needle: &str) -> bool {
         self.log.borrow().iter().any(|l| l.contains(needle))
     }
@@ -67,7 +98,22 @@ impl CommandRunner for FakeSystem {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         Ok(match (program, args.as_slice()) {
             ("uname", ["-n"]) => Output::ok(format!("{HOST}\n")),
-            ("id", ["-u"]) => Output::ok("1000\n"),
+            ("id", ["-u"]) => Output::ok(format!("{}\n", self.uid.borrow())),
+            ("true", []) if cmd.program == "sudo" => {
+                if *self.sudo_ok.borrow() {
+                    Output::ok("")
+                } else {
+                    Output::fail(1, "sudo: a password is required")
+                }
+            }
+            ("apt-mark", ["showmanual"]) => {
+                let mut s = String::new();
+                for n in self.apt_manual.borrow().iter() {
+                    s.push_str(n);
+                    s.push('\n');
+                }
+                Output::ok(s)
+            }
             _ => Output::fail(127, format!("fake: no handler for `{cmd}`")),
         })
     }
@@ -81,6 +127,8 @@ impl CommandRunner for FakeSystem {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         Ok(match (program, args.as_slice()) {
             ("pixi", ["global", "sync"]) => *self.pixi_sync_code.borrow(),
+            ("apt-get", a) => self.apt_get(cmd, a),
+            ("-v", []) if cmd.program == "sudo" => i32::from(!*self.sudo_ok.borrow()),
             _ => 127,
         })
     }
@@ -186,6 +234,10 @@ impl Env {
             base: base.clone(),
             programs: RefCell::new(["pixi".to_string()].into()),
             pixi_sync_code: RefCell::new(0),
+            apt_manual: RefCell::default(),
+            apt_repo: RefCell::default(),
+            uid: RefCell::new(1000),
+            sudo_ok: RefCell::new(true),
             log: RefCell::default(),
         };
         let remote = base.join("remote.git");
@@ -260,6 +312,41 @@ impl Env {
         p
     }
 
+    /// Make this a Debian-like machine with `manual` already installed.
+    pub fn with_apt(&self, manual: &[&str], repo: &[&str]) {
+        let mut p = self.sys.programs.borrow_mut();
+        p.extend(["apt-get", "apt-mark", "sudo"].map(String::from));
+        *self.sys.apt_manual.borrow_mut() = manual.iter().map(|s| s.to_string()).collect();
+        *self.sys.apt_repo.borrow_mut() =
+            repo.iter().chain(manual).map(|s| s.to_string()).collect();
+    }
+
+    pub fn apt_installed(&self, name: &str) -> bool {
+        self.sys.apt_manual.borrow().contains(name)
+    }
+
+    /// An `App` wired to this machine, for driving library functions directly.
+    pub fn with_app<R>(
+        &self,
+        script: &Script,
+        interactive: bool,
+        f: impl FnOnce(&App) -> R,
+    ) -> (R, String) {
+        let (ui, buf): (Ui, SharedBuf) = Ui::capture();
+        let app = App {
+            paths: self.paths.clone(),
+            runner: &self.sys,
+            prompter: script,
+            ui: &ui,
+            dry_run: false,
+            interactive,
+            hostname: Some(HOST.into()),
+            privilege: Default::default(),
+        };
+        let r = f(&app);
+        (r, buf.contents())
+    }
+
     pub fn write_pixi(&self, text: &str) {
         fs::create_dir_all(self.paths.pixi_manifest.parent().unwrap()).unwrap();
         fs::write(&self.paths.pixi_manifest, text).unwrap();
@@ -290,6 +377,7 @@ impl Env {
             dry_run: cli.dry_run,
             interactive: true,
             hostname: Some(HOST.into()),
+            privilege: Default::default(),
         };
         let r = app.run(&cli);
         (r, buf.contents())

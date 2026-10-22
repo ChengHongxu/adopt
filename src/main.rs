@@ -22,6 +22,7 @@ fn main() -> ExitCode {
             dry_run: cli.dry_run,
             interactive: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
             hostname: None,
+            privilege: Default::default(),
         };
         app.run(&cli)
     });

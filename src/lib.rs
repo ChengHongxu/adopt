@@ -9,6 +9,7 @@ pub mod init;
 pub mod model;
 pub mod paths;
 pub mod plan;
+pub mod privilege;
 pub mod prompt;
 pub mod runner;
 pub mod state;
@@ -19,6 +20,7 @@ use anyhow::{Result, bail};
 use crate::adapters::{Adapter, Ctx};
 use crate::cli::{Cli, Command};
 use crate::paths::Paths;
+use crate::privilege::PrivilegeCell;
 use crate::prompt::Prompter;
 use crate::runner::{Cmd, CommandRunner};
 use crate::state::{Local, Shared};
@@ -35,6 +37,7 @@ pub struct App<'a> {
     pub interactive: bool,
     /// Overrides `uname -n` (tests).
     pub hostname: Option<String>,
+    pub privilege: PrivilegeCell,
 }
 
 impl App<'_> {
@@ -51,6 +54,8 @@ impl App<'_> {
             paths: &self.paths,
             ui: self.ui,
             dry_run: self.dry_run,
+            interactive: self.interactive,
+            privilege: &self.privilege,
         }
     }
 
