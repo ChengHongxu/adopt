@@ -64,10 +64,16 @@ impl FakeSystem {
         if cmd.program != "sudo" && *self.uid.borrow() != 0 {
             return 100; // "are you root?"
         }
+        if args.contains(&"update") {
+            return 0;
+        }
         let Some(pos) = args.iter().position(|a| *a == "install" || *a == "remove") else {
             return 64;
         };
         let names = &args[pos + 1..];
+        if names.is_empty() {
+            return 64;
+        }
         if args[pos] == "install" {
             if names.iter().any(|n| !self.apt_repo.borrow().contains(*n)) {
                 return 100; // E: Unable to locate package
@@ -80,7 +86,29 @@ impl FakeSystem {
                 self.apt_manual.borrow_mut().remove(*n);
             }
         }
+        self.touch_dpkg();
         0
+    }
+
+    /// Rewrite the fake `/var/lib/dpkg/status`, as dpkg does on every change.
+    pub fn touch_dpkg(&self) {
+        let p = self.base.join("root/var/lib/dpkg/status");
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let names: Vec<String> = self.apt_manual.borrow().iter().cloned().collect();
+        fs::write(p, format!("{}\n", names.join("\n"))).unwrap();
+    }
+
+    /// `sh -c 'printf ... > /etc/apt/apt.conf.d/99adopt' sh TEXT`, redirected into the sandbox.
+    fn sh(&self, args: &[&str]) -> i32 {
+        match args {
+            ["-c", script, "sh", text] if script.contains("99adopt") => {
+                let p = self.base.join("root/etc/apt/apt.conf.d/99adopt");
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, text).unwrap();
+                0
+            }
+            _ => 127,
+        }
     }
 
     pub fn ran(&self, needle: &str) -> bool {
@@ -128,6 +156,7 @@ impl CommandRunner for FakeSystem {
         Ok(match (program, args.as_slice()) {
             ("pixi", ["global", "sync"]) => *self.pixi_sync_code.borrow(),
             ("apt-get", a) => self.apt_get(cmd, a),
+            ("sh", a) => self.sh(a),
             ("-v", []) if cmd.program == "sudo" => i32::from(!*self.sudo_ok.borrow()),
             _ => 127,
         })
@@ -319,6 +348,20 @@ impl Env {
         *self.sys.apt_manual.borrow_mut() = manual.iter().map(|s| s.to_string()).collect();
         *self.sys.apt_repo.borrow_mut() =
             repo.iter().chain(manual).map(|s| s.to_string()).collect();
+        drop(p);
+        self.sys.touch_dpkg();
+    }
+
+    /// The user runs `apt install <name>` by hand.
+    pub fn apt_add(&self, name: &str) {
+        self.sys.apt_manual.borrow_mut().insert(name.into());
+        self.sys.touch_dpkg();
+    }
+
+    /// The user runs `apt remove <name>` by hand.
+    pub fn apt_remove(&self, name: &str) {
+        self.sys.apt_manual.borrow_mut().remove(name);
+        self.sys.touch_dpkg();
     }
 
     pub fn apt_installed(&self, name: &str) -> bool {
@@ -366,6 +409,16 @@ impl Env {
 
     /// Run `adopt <args>` against this machine. Returns the result and captured output.
     pub fn run(&self, args: &[&str], script: &Script) -> (Result<()>, String) {
+        self.run_as(args, script, true)
+    }
+
+    /// Like [`Env::run`], choosing whether a terminal is attached.
+    pub fn run_as(
+        &self,
+        args: &[&str],
+        script: &Script,
+        interactive: bool,
+    ) -> (Result<()>, String) {
         let cli =
             Cli::try_parse_from(std::iter::once("adopt").chain(args.iter().copied())).unwrap();
         let (ui, buf): (Ui, SharedBuf) = Ui::capture();
@@ -375,7 +428,7 @@ impl Env {
             prompter: script,
             ui: &ui,
             dry_run: cli.dry_run,
-            interactive: true,
+            interactive,
             hostname: Some(HOST.into()),
             privilege: Default::default(),
         };
@@ -392,6 +445,43 @@ impl Env {
         }
         script.assert_done();
         out
+    }
+
+    /// `adopt <args>` with no terminal (systemd timer, cloud-init). Must succeed.
+    pub fn batch(&self, args: &[&str]) -> String {
+        let script = Script::default();
+        let (r, out) = self.run_as(args, &script, false);
+        if let Err(e) = r {
+            panic!("adopt {args:?} failed: {e:#}\n--- output ---\n{out}");
+        }
+        out
+    }
+
+    /// Another machine replaces packages.toml and pushes it.
+    pub fn publish(&self, packages_toml: &str) {
+        let laptop = self.dir.path().join("laptop");
+        if laptop.exists() {
+            self.git(&laptop, &["pull", "--quiet", "--rebase"]);
+        } else {
+            self.other_clone("laptop");
+        }
+        fs::write(laptop.join("packages.toml"), packages_toml).unwrap();
+        self.git(&laptop, &["add", "packages.toml"]);
+        self.git(
+            &laptop,
+            &["commit", "--quiet", "-m", "laptop: edit packages"],
+        );
+        self.git(&laptop, &["push", "--quiet"]);
+    }
+
+    /// Number of logged commands containing `needle`.
+    pub fn count_runs(&self, needle: &str) -> usize {
+        self.sys
+            .log
+            .borrow()
+            .iter()
+            .filter(|l| l.contains(needle))
+            .count()
     }
 
     pub fn init(&self, groups: &str) {

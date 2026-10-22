@@ -223,7 +223,7 @@ fn canon_value(v: &Value, out: &mut String) {
 }
 
 /// FNV-1a: tiny and, unlike std's hasher, stable across Rust versions.
-fn fnv1a64(bytes: &[u8]) -> u64 {
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         h ^= u64::from(*b);

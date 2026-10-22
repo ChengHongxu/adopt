@@ -1,11 +1,13 @@
 //! adopt: install packages with native tools, then adopt them into a shared manifest.
 
 pub mod adapters;
+pub mod apply;
 pub mod claim;
 pub mod cli;
 pub mod commit_msg;
 pub mod git;
 pub mod init;
+pub mod list;
 pub mod model;
 pub mod paths;
 pub mod plan;
@@ -13,6 +15,8 @@ pub mod privilege;
 pub mod prompt;
 pub mod runner;
 pub mod state;
+pub mod status;
+pub mod sync;
 pub mod ui;
 
 use anyhow::{Result, bail};
@@ -45,6 +49,9 @@ impl App<'_> {
         match &cli.command {
             None => claim::run(self),
             Some(Command::Init(args)) => init::run(self, args),
+            Some(Command::Sync(args)) => sync::run(self, args),
+            Some(Command::Status(args)) => status::run(self, args),
+            Some(Command::List) => list::run(self),
         }
     }
 

@@ -9,6 +9,7 @@ use toml_edit::Table;
 
 use super::{Adapter, Ctx, Op, Outcome, PkgSpec};
 use crate::model::ManagerId;
+use crate::paths::Paths;
 use crate::runner::{Cmd, CommandRunner};
 use crate::state::{PixiManifest, write_atomic};
 
@@ -98,6 +99,10 @@ impl Adapter for Pixi {
 
     fn tables(&self, _cx: &Ctx) -> Result<BTreeMap<String, Table>> {
         Ok(PixiManifest::load(&self.manifest)?.envs())
+    }
+
+    fn watch_paths(&self, _paths: &Paths) -> Vec<PathBuf> {
+        vec![self.manifest.clone()]
     }
 
     fn planned_commands(&self, pkgs: &[PkgSpec], _op: Op) -> Vec<Cmd> {

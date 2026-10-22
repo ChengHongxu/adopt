@@ -71,6 +71,10 @@ pub trait Adapter {
         false
     }
 
+    /// Files whose mtime changes whenever this manager's package set does. `adopt
+    /// status --prompt` stats these instead of running the manager.
+    fn watch_paths(&self, paths: &Paths) -> Vec<std::path::PathBuf>;
+
     /// Native names of everything the user asked for (not dependencies).
     fn list_user_installed(&self, cx: &Ctx) -> Result<BTreeSet<String>>;
 

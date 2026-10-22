@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::App;
+use crate::adapters::apt::{self, Apt};
 use crate::claim::{commit_and_push, parse_groups};
 use crate::cli::InitArgs;
 use crate::git::Git;
+use crate::model::ManagerId;
 use crate::runner::Cmd;
 use crate::state::{Local, Shared, shared, write_atomic};
 
@@ -108,10 +110,60 @@ pub fn run(app: &App, args: &InitArgs) -> Result<()> {
         ui.ok(format!("已写入 {}", app.paths.tilde(&local.file.path)));
     }
 
+    offer_apt_hook(app, args)?;
     if cloned_in_dry_run {
         return Ok(());
     }
     prepare_repo(app, &repo)
+}
+
+/// The hook needs root and writes under /etc, so it is only installed with explicit
+/// consent: `--apt-hook`, or a yes after seeing exactly what will be written.
+fn offer_apt_hook(app: &App, args: &InitArgs) -> Result<()> {
+    let ui = app.ui;
+    if !app.adapters().iter().any(|a| a.id() == ManagerId::Apt)
+        || app.paths.sys(apt::HOOK_FILE).exists()
+    {
+        return Ok(());
+    }
+    let wanted = if args.apt_hook {
+        true
+    } else if app.interactive && !args.yes {
+        ui.line("可选：安装 apt 钩子，每次 apt/dpkg 装卸后更新一个时间戳，`adopt status` 据此判断是否需要重新计算。");
+        ui.line(format!("将以 root 写入 {}：", apt::HOOK_FILE));
+        for l in apt::HOOK_TEXT.lines() {
+            ui.line(format!("  {}", ui.dim(l)));
+        }
+        app.prompter
+            .confirm("安装 apt 钩子吗？（需要 sudo）", false)?
+    } else {
+        false
+    };
+    if !wanted {
+        return Ok(());
+    }
+    let cmd = match app.ctx().elevate(Apt::hook_install_cmd()) {
+        Ok(c) => c,
+        Err(why) => {
+            ui.warn(format!("跳过 apt 钩子：{why}"));
+            return Ok(());
+        }
+    };
+    if app.dry_run {
+        ui.would(cmd.to_string());
+        return Ok(());
+    }
+    if let Err(why) = app.privilege.ensure(app.runner, app.interactive) {
+        ui.warn(format!("跳过 apt 钩子：{why}"));
+        return Ok(());
+    }
+    match app.runner.run_attached(&cmd)? {
+        0 => ui.ok(format!("已安装 {}", apt::HOOK_FILE)),
+        code => ui.warn(format!(
+            "安装 apt 钩子失败（退出码 {code}），不影响其他功能"
+        )),
+    }
+    Ok(())
 }
 
 /// Create packages.toml (and keep chezmoi from treating it as a dotfile), then commit.

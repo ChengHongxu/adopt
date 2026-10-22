@@ -25,8 +25,8 @@ fn init_baselines_apt_and_only_new_packages_are_asked() {
     // Nothing new yet: no prompts.
     env.ok(&[], []);
 
-    env.sys.apt_manual.borrow_mut().insert("htop".into());
-    env.sys.apt_manual.borrow_mut().insert("libssl-dev".into());
+    env.apt_add("htop");
+    env.apt_add("libssl-dev");
     let out = env.ok(&[], [Key('a'), Key('l')]);
     assert!(out.contains("本机新装了 2 个软件"), "{out}");
     assert!(out.contains("已提交并推送：+htop(apt)"), "{out}");
@@ -46,7 +46,7 @@ fn rebaseline_keeps_or_retakes() {
     let env = Env::new();
     env.with_apt(&["bash"], &[]);
     env.init("");
-    env.sys.apt_manual.borrow_mut().insert("htop".into());
+    env.apt_add("htop");
 
     let out = env.ok(&["init", "--yes"], []);
     assert!(out.contains("已有基线，保留"), "{out}");
@@ -156,7 +156,7 @@ fn shared_entry_with_other_apt_name_is_not_new() {
     )
     .unwrap();
     env.git(&env.repo, &["commit", "--quiet", "-am", "fd"]);
-    env.sys.apt_manual.borrow_mut().insert("fd-find".into());
-    env.sys.apt_manual.borrow_mut().insert("java".into());
+    env.apt_add("fd-find");
+    env.apt_add("java");
     env.ok(&[], []);
 }

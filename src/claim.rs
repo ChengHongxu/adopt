@@ -6,15 +6,20 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use console::measure_text_width;
 
+use toml_edit::Table;
+
 use crate::App;
+use crate::adapters::Adapter;
+use crate::apply::{self, RootPolicy};
 use crate::commit_msg::{self, Change};
 use crate::git::{Git, Pull, Push};
 use crate::model::{ManagerId, Section};
-use crate::plan::{self, Inventory, NewItem};
-use crate::state::{Applied, Entry, Local, Shared, fingerprint, shared};
+use crate::plan::{self, Action, Inventory, NewItem, Origin, Pending, Plan, Want};
+use crate::state::{Applied, Entry, Local, Mapping, Shared, fingerprint, shared};
 
-/// Mutable state for one interactive run. Nothing is written until [`Session::finish`],
-/// so Ctrl-C at any prompt leaves every file untouched.
+/// Mutable state for one interactive run. Decisions are only written by
+/// [`Session::finish`], so Ctrl-C at a prompt discards them; what was already
+/// installed or removed before the prompts is recorded right away.
 pub struct Session<'a> {
     pub app: &'a App<'a>,
     pub repo: PathBuf,
@@ -140,11 +145,69 @@ pub fn run(app: &App) -> Result<()> {
         s.reload_shared()?;
     }
 
+    // First bring the machine in line with the manifests (asking before sudo)...
     let adapters = app.adapters();
     let inv = Inventory::collect(&adapters, &app.ctx())?;
-    let new = plan::find_new(&s.shared, &s.local, &inv)?;
+    let plan = plan::reconcile(&s.shared, &s.local, &inv)?;
+    let report = apply::apply(app, &mut s.local, &adapters, &plan, RootPolicy::Confirm)?;
+    if let Some(line) = apply::summary(&report) {
+        app.ui.ok(line);
+    }
+    // ...and persist that right away: those packages really are installed now.
+    if !app.dry_run && s.local.file.is_dirty() {
+        s.local.file.save()?;
+    }
+
+    // ...then ask about everything that needs a decision. A dry run installed
+    // nothing, so it keeps using the first snapshot.
+    let (pending, new) = if app.dry_run {
+        (plan.pending, plan::find_new(&s.shared, &s.local, &inv)?)
+    } else {
+        let inv = Inventory::collect(&adapters, &app.ctx())?;
+        let plan = plan::reconcile(&s.shared, &s.local, &inv)?;
+        (plan.pending, plan::find_new(&s.shared, &s.local, &inv)?)
+    };
+    let (mut failed, mut missing, mut drift) = (Vec::new(), Vec::new(), Vec::new());
+    for p in pending {
+        match p {
+            Pending::Failed {
+                manager,
+                want,
+                error,
+            } => failed.push((manager, want, error)),
+            Pending::Missing { manager, want } => missing.push((manager, want)),
+            Pending::Drift {
+                manager,
+                want,
+                current,
+            } => drift.push((manager, want, current)),
+        }
+    }
+    claim_failed(&mut s, &adapters, &failed)?;
     claim_new(&mut s, &new)?;
-    s.finish(&[])
+    claim_missing(&mut s, &adapters, &missing)?;
+    claim_drift(&mut s, &adapters, &drift)?;
+    s.finish(&[])?;
+    crate::status::refresh(app);
+    Ok(())
+}
+
+/// Install/update one package right now, asking before sudo.
+fn apply_one(
+    s: &mut Session,
+    adapters: &[Box<dyn Adapter>],
+    manager: ManagerId,
+    action: Action,
+) -> Result<()> {
+    let plan = Plan {
+        actions: vec![(manager, action)],
+        pending: Vec::new(),
+    };
+    let report = apply::apply(s.app, &mut s.local, adapters, &plan, RootPolicy::Confirm)?;
+    if let Some(line) = apply::summary(&report) {
+        s.app.ui.ok(line);
+    }
+    Ok(())
 }
 
 // ---- new packages ----
@@ -259,4 +322,239 @@ pub fn parse_groups(s: &str) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+// ---- installs that failed ----
+
+const RETRY_KEYS: [char; 3] = ['u', 'k', 's'];
+const RETRY_LEGEND: &str = "[u]重试 [k]本机例外 [s]稍后";
+
+pub fn claim_failed(
+    s: &mut Session,
+    adapters: &[Box<dyn Adapter>],
+    items: &[(ManagerId, Want, String)],
+) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let ui = s.app.ui;
+    ui.line(format!("有 {} 个软件安装失败：", items.len()));
+    let width = name_width(items.iter().map(|(_, w, _)| w.native.as_str()));
+    for (manager, want, error) in items {
+        let (manager, section) = (*manager, manager.section());
+        let reason = error.lines().last().unwrap_or_default();
+        ui.line(format!(
+            "{}{}",
+            label(manager, &want.native, width),
+            ui.dim(reason)
+        ));
+        if section == Section::System {
+            // Usually the name differs on this platform: ask once, write it back.
+            let answer = s.app.prompter.input(
+                &format!("    {manager} 上的正确包名（留空跳过，- 表示 {manager} 不装）"),
+                "",
+            )?;
+            match answer.trim() {
+                "" => {}
+                "-" => {
+                    remap(s, want, manager, Mapping::Skip)?;
+                    s.local.clear_failed(section, &want.logical);
+                }
+                name => {
+                    remap(s, want, manager, Mapping::Name(name.to_string()))?;
+                    s.local.clear_failed(section, &want.logical);
+                    let renamed = Want {
+                        native: name.to_string(),
+                        ..want.clone()
+                    };
+                    apply_one(s, adapters, manager, Action::Install(renamed))?;
+                }
+            }
+            continue;
+        }
+        let key = s
+            .app
+            .prompter
+            .key(&format!("    {RETRY_LEGEND} > "), &RETRY_KEYS)?;
+        match key {
+            'u' => {
+                s.local.clear_failed(section, &want.logical);
+                apply_one(s, adapters, manager, Action::Install(want.clone()))?;
+            }
+            'k' => {
+                opt_out(s, section, want);
+                s.local.clear_failed(section, &want.logical);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Record a per-manager name (or `false`) on the entry, wherever it lives.
+fn remap(s: &mut Session, want: &Want, manager: ManagerId, mapping: Mapping) -> Result<()> {
+    match want.origin {
+        Origin::Shared => {
+            s.shared.set_mapping(&want.logical, manager, &mapping)?;
+            let tag = match &mapping {
+                Mapping::Name(n) => format!("{manager}={n}"),
+                Mapping::Skip => format!("{manager}=false"),
+            };
+            s.changes.push(Change::Update {
+                name: want.logical.clone(),
+                tag,
+            });
+        }
+        Origin::Local => {
+            let entry = s
+                .local
+                .entries(Section::System)?
+                .into_iter()
+                .find(|e| e.name == want.logical);
+            if let Some(mut e) = entry {
+                e.mappings.insert(manager, mapping);
+                s.local.upsert_entry(&e);
+                s.local_changes += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// This machine stops wanting `want`: an exception for shared entries, deletion for local ones.
+fn opt_out(s: &mut Session, section: Section, want: &Want) {
+    match want.origin {
+        Origin::Shared => {
+            s.local.add_exception(section, &want.logical);
+        }
+        Origin::Local => {
+            s.local.remove_entry(section, &want.logical);
+        }
+    }
+    s.local.remove_applied(section, &want.logical);
+    s.local_changes += 1;
+}
+
+// ---- packages the user uninstalled ----
+
+const MISSING_KEYS: [char; 4] = ['r', 'k', 'u', 's'];
+const MISSING_LEGEND: &str = "[r]从所有机器移除 [k]本机例外 [u]重新装上 [s]稍后";
+
+pub fn claim_missing(
+    s: &mut Session,
+    adapters: &[Box<dyn Adapter>],
+    items: &[(ManagerId, Want)],
+) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    s.app
+        .ui
+        .line(format!("本机缺少清单里的 {} 个软件：", items.len()));
+    let width = name_width(items.iter().map(|(_, w)| w.native.as_str()));
+    for (idx, (manager, want)) in items.iter().enumerate() {
+        let (manager, section) = (*manager, manager.section());
+        let legend = if idx == 0 {
+            format!("{MISSING_LEGEND} > ")
+        } else {
+            "> ".into()
+        };
+        let key = s.app.prompter.key(
+            &format!("{}{legend}", label(manager, &want.native, width)),
+            &MISSING_KEYS,
+        )?;
+        match key {
+            'r' => {
+                match want.origin {
+                    Origin::Shared => {
+                        s.shared.remove(section, &want.logical);
+                        s.changes.push(Change::Remove {
+                            name: want.logical.clone(),
+                            tag: manager.to_string(),
+                        });
+                    }
+                    Origin::Local => {
+                        s.local.remove_entry(section, &want.logical);
+                        s.local_changes += 1;
+                    }
+                }
+                s.local.remove_applied(section, &want.logical);
+            }
+            'k' => opt_out(s, section, want),
+            'u' => apply_one(s, adapters, manager, Action::Install(want.clone()))?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// ---- pixi envs edited on this machine ----
+
+const DRIFT_KEYS: [char; 3] = ['a', 'r', 's'];
+const DRIFT_LEGEND: &str = "[a]推到共享清单 [r]恢复为清单版本 [s]稍后";
+
+pub fn claim_drift(
+    s: &mut Session,
+    adapters: &[Box<dyn Adapter>],
+    items: &[(ManagerId, Want, Table)],
+) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    s.app.ui.line(format!(
+        "本机改动了 {} 个环境（和清单不一致）：",
+        items.len()
+    ));
+    let width = name_width(items.iter().map(|(_, w, _)| w.native.as_str()));
+    for (idx, (manager, want, current)) in items.iter().enumerate() {
+        let (manager, section) = (*manager, manager.section());
+        let legend = if idx == 0 {
+            format!("{DRIFT_LEGEND} > ")
+        } else {
+            "> ".into()
+        };
+        let key = s.app.prompter.key(
+            &format!("{}{legend}", label(manager, &want.native, width)),
+            &DRIFT_KEYS,
+        )?;
+        match key {
+            'a' => {
+                match want.origin {
+                    Origin::Shared => {
+                        let groups = s.shared.get(section, &want.logical)?.and_then(|e| e.groups);
+                        s.shared.upsert(
+                            &Entry::pixi(&want.logical, current.clone()).with_groups(groups),
+                        );
+                        s.changes.push(Change::Update {
+                            name: want.logical.clone(),
+                            tag: manager.to_string(),
+                        });
+                    }
+                    Origin::Local => {
+                        s.local
+                            .upsert_entry(&Entry::pixi(&want.logical, current.clone()));
+                        s.local_changes += 1;
+                    }
+                }
+                let by_adopt = s
+                    .local
+                    .applied(section)
+                    .get(&want.logical)
+                    .is_some_and(|a| a.by_adopt);
+                s.local.set_applied(
+                    section,
+                    &want.logical,
+                    &Applied {
+                        manager,
+                        native: want.native.clone(),
+                        by_adopt,
+                        fp: Some(fingerprint(current)),
+                    },
+                );
+            }
+            'r' => apply_one(s, adapters, manager, Action::Update(want.clone()))?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
