@@ -1,0 +1,25 @@
+[package]
+name = "adopt"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Install packages natively, then adopt them into your dotfiles manifest"
+repository = "https://github.com/ChengHongxu/adopt"
+readme = "README.md"
+
+[dependencies]
+anyhow = "=1.0.104"
+clap = { version = "=4.6.7", features = ["derive"] }
+console = "=0.16.6"
+dialoguer = { version = "=0.12.0", default-features = false }
+toml_edit = "=0.25.17"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
