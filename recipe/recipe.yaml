@@ -16,6 +16,10 @@ build:
   number: 0
   skip:
     - win
+  # The binaries are static (musl, static-pie). Running patchelf on them
+  # corrupts them, so the installed `adopt` segfaults.
+  dynamic_linking:
+    binary_relocation: false
   script:
     - |
       set -euo pipefail
