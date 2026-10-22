@@ -244,8 +244,9 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
         let mut act = |a: Action| plan.actions.push((manager, a));
 
         for (logical, w) in &want {
-            let present = installed.names.contains(&w.native);
             let prev = applied.get(logical).filter(|a| a.manager == manager);
+            let present = installed.names.contains(&w.native)
+                || (untracked(&w.native) && prev.is_some_and(|a| a.native == w.native));
             let current = installed.tables.get(&w.native);
             if present && failed.contains_key(logical) {
                 act(Action::ClearFailed {
@@ -303,7 +304,7 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
             if want.contains_key(logical) || a.manager != manager {
                 continue;
             }
-            if a.by_adopt && installed.names.contains(&a.native) {
+            if a.by_adopt && (installed.names.contains(&a.native) || untracked(&a.native)) {
                 act(Action::Remove {
                     logical: logical.clone(),
                     native: a.native.clone(),
@@ -323,6 +324,12 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
         }
     }
     Ok(plan)
+}
+
+/// dnf groups (`@development-tools`) never show up in the user-installed list, so for
+/// them "installed" can only mean "adopt applied it".
+fn untracked(native: &str) -> bool {
+    native.starts_with('@')
 }
 
 /// Everything waiting for the user: new packages, pending items, and changes `sync`

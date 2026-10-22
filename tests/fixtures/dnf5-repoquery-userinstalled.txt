@@ -1,0 +1,11 @@
+NetworkManager
+bash
+btrfs-progs
+coreutils
+dnf5
+fedora-release-cloud
+git-core
+kernel-core
+openssh-server
+sudo
+zsh

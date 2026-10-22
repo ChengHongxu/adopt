@@ -245,6 +245,9 @@ pub fn claim_new(s: &mut Session, items: &[NewItem]) -> Result<()> {
             'a' => adopt_shared(s, item, None)?,
             'g' => {
                 let groups = ask_groups(s)?;
+                if groups.is_empty() {
+                    ui.line("    没有选分组，按所有机器处理");
+                }
                 adopt_shared(s, item, (!groups.is_empty()).then_some(groups))?;
             }
             'l' => {
@@ -293,23 +296,34 @@ fn adopt_shared(s: &mut Session, item: &NewItem, groups: Option<Vec<String>>) ->
     Ok(())
 }
 
-/// Comma-separated group names, defaulting to this machine's groups.
+const NEW_GROUP: &str = "+ 新分组…";
+
+/// Pick from the groups already in use (this machine's are pre-checked), or type new
+/// ones. With no groups anywhere yet, just ask for names.
 pub fn ask_groups(s: &Session) -> Result<Vec<String>> {
+    let mine = s.local.groups();
     let mut known = s.shared.groups();
-    known.extend(s.local.groups());
-    let hint = if known.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "（已有：{}）",
-            known.into_iter().collect::<Vec<_>>().join(", ")
-        )
-    };
-    let answer = s.app.prompter.input(
-        &format!("    分组，逗号分隔{hint}"),
-        &s.local.groups().join(","),
-    )?;
-    Ok(parse_groups(&answer))
+    known.extend(mine.iter().cloned());
+    let known: Vec<String> = known.into_iter().collect();
+    let prompter = s.app.prompter;
+    if known.is_empty() {
+        let answer = prompter.input("    分组，逗号分隔，例如 work,homelab", "")?;
+        return Ok(parse_groups(&answer));
+    }
+    let mut items = known.clone();
+    items.push(NEW_GROUP.into());
+    let defaults: Vec<bool> = items.iter().map(|g| mine.contains(g)).collect();
+    let picked = prompter.multi_select("    选择分组（空格勾选，回车确认）", &items, &defaults)?;
+    let mut out: Vec<String> = picked
+        .iter()
+        .filter_map(|&i| known.get(i).cloned())
+        .collect();
+    if picked.contains(&known.len()) {
+        out.extend(parse_groups(&prompter.input("    新分组，逗号分隔", "")?));
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 pub fn parse_groups(s: &str) -> Vec<String> {

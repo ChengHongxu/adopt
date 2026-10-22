@@ -1,0 +1,8 @@
+bat
+fd
+git
+htop
+neovim
+ripgrep
+wget
+hashicorp/tap/terraform

@@ -1,0 +1,8 @@
+dnf5 version 5.2.8.1
+dnf5 plugin API version 2.0
+libdnf5 version 5.2.8.1
+libdnf5 plugin API version 2.0
+
+Loaded dnf5 plugins:
+  name: builddep
+  version: 1.0.0

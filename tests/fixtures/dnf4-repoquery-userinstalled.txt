@@ -1,0 +1,12 @@
+NetworkManager
+bash
+coreutils
+dnf
+fedora-release-server
+git
+htop
+kernel
+openssh-server
+sudo
+vim-enhanced
+zsh

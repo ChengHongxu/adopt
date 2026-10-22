@@ -5,7 +5,7 @@ use std::fmt;
 use anyhow::Result;
 use console::Term;
 use dialoguer::theme::ColorfulTheme;
-use dialoguer::{Confirm, Input};
+use dialoguer::{Confirm, Input, MultiSelect};
 
 /// Returned (wrapped in anyhow) when the user hits Ctrl-C or Esc at a prompt.
 #[derive(Debug)]
@@ -25,6 +25,13 @@ pub trait Prompter {
     fn confirm(&self, question: &str, default: bool) -> Result<bool>;
     /// Free text; an empty answer returns `default`.
     fn input(&self, question: &str, default: &str) -> Result<String>;
+    /// Indices of the checked `items`; `defaults` says which start checked.
+    fn multi_select(
+        &self,
+        question: &str,
+        items: &[String],
+        defaults: &[bool],
+    ) -> Result<Vec<usize>>;
 }
 
 pub struct TermPrompter {
@@ -84,6 +91,22 @@ impl Prompter for TermPrompter {
             .default(default)
             .interact_on(&self.term)
             .map_err(map_err)
+    }
+
+    fn multi_select(
+        &self,
+        question: &str,
+        items: &[String],
+        defaults: &[bool],
+    ) -> Result<Vec<usize>> {
+        let theme = ColorfulTheme::default();
+        MultiSelect::with_theme(&theme)
+            .with_prompt(question)
+            .items(items)
+            .defaults(defaults)
+            .interact_on_opt(&self.term)
+            .map_err(map_err)?
+            .ok_or_else(|| Aborted.into())
     }
 
     fn input(&self, question: &str, default: &str) -> Result<String> {

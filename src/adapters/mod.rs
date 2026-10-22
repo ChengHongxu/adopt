@@ -2,6 +2,8 @@
 //! `Section`, a new `ManagerId`, and one more impl of [`Adapter`].
 
 pub mod apt;
+pub mod brew;
+pub mod dnf;
 pub mod pixi;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,9 +93,14 @@ pub trait Adapter {
     fn remove(&self, cx: &Ctx, pkgs: &[PkgSpec]) -> Result<Vec<Outcome>>;
 }
 
-/// The adapters usable on this machine: at most one system manager plus pixi.
+/// The adapters usable on this machine: at most one system manager (apt, then dnf,
+/// then brew, so Linuxbrew next to apt does not take over) plus pixi.
 pub fn detect(runner: &dyn CommandRunner, paths: &Paths) -> Vec<Box<dyn Adapter>> {
-    let system: Vec<Box<dyn Adapter>> = vec![Box::new(apt::Apt)];
+    let system: Vec<Box<dyn Adapter>> = vec![
+        Box::new(apt::Apt),
+        Box::new(dnf::Dnf::new()),
+        Box::new(brew::Brew),
+    ];
     let mut out: Vec<Box<dyn Adapter>> = system
         .into_iter()
         .filter(|a| a.is_available(runner))

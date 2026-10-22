@@ -65,7 +65,15 @@ fn claim_for_groups_and_ignore() {
     env.write_pixi(PIXI_TWO_ENVS);
     env.init("work");
 
-    env.ok(&[], [Key('g'), Text("homelab, work".into()), Key('i')]);
+    env.ok(
+        &[],
+        [
+            Key('g'),
+            Pick(vec!["work", "新分组"]),
+            Text("homelab".into()),
+            Key('i'),
+        ],
+    );
     let shared = env.packages_toml();
     assert!(
         shared.contains("groups = [\"homelab\", \"work\"]"),
