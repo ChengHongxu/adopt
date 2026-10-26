@@ -23,7 +23,7 @@ pub struct Applied {
     pub native: String,
     /// adopt ran the install itself. Only these are removed when the shared entry goes away.
     pub by_adopt: bool,
-    /// Pixi only: fingerprint of the env table as last written.
+    /// Fingerprint of the entry's body as last applied: pixi env table, or npm `version`.
     pub fp: Option<String>,
 }
 

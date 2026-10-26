@@ -1,9 +1,10 @@
-//! One adapter per package manager. Adding uv / npm -g / cargo install means a new
-//! `Section`, a new `ManagerId`, and one more impl of [`Adapter`].
+//! One adapter per package manager. Adding a new one means a new [`Section`], a new
+//! [`ManagerId`], and one more impl of [`Adapter`].
 
 pub mod apt;
 pub mod brew;
 pub mod dnf;
+pub mod npm;
 pub mod pixi;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,7 +41,7 @@ pub struct PkgSpec {
     pub logical: String,
     /// Name this manager knows it by.
     pub native: String,
-    /// Pixi only: the env table to write.
+    /// Pixi: the env table to write. Npm: the entry's `version`, if any.
     pub body: Option<Table>,
 }
 
@@ -94,7 +95,9 @@ pub trait Adapter {
 }
 
 /// The adapters usable on this machine: at most one system manager (apt, then dnf,
-/// then brew, so Linuxbrew next to apt does not take over) plus pixi.
+/// then brew, so Linuxbrew next to apt does not take over), then pixi, then npm.
+/// The order is also the apply order: npm comes last because node usually comes
+/// from pixi.
 pub fn detect(runner: &dyn CommandRunner, paths: &Paths) -> Vec<Box<dyn Adapter>> {
     let system: Vec<Box<dyn Adapter>> = vec![
         Box::new(apt::Apt),
@@ -110,15 +113,20 @@ pub fn detect(runner: &dyn CommandRunner, paths: &Paths) -> Vec<Box<dyn Adapter>
     if pixi.is_available(runner) {
         out.push(Box::new(pixi));
     }
+    let npm = npm::Npm::new();
+    if npm.is_available(runner) {
+        out.push(Box::new(npm));
+    }
     out
 }
 
 /// Run one command for all of `pkgs`; if it fails and there is more than one, retry
-/// each on its own so a single unknown name only fails itself. `root` wraps the
-/// commands in sudo.
+/// each on its own so a single unknown name only fails itself. `arg` turns a spec into
+/// its command-line word (usually the native name); `root` wraps the commands in sudo.
 pub fn batch_then_each(
     cx: &Ctx,
     pkgs: &[PkgSpec],
+    arg: impl Fn(&PkgSpec) -> String,
     build: impl Fn(&[&str]) -> Cmd,
     root: bool,
 ) -> Result<Vec<Outcome>> {
@@ -129,7 +137,8 @@ pub fn batch_then_each(
         let cmd = build(names);
         if root { cx.elevate(cmd) } else { Ok(cmd) }
     };
-    let all: Vec<&str> = pkgs.iter().map(|p| p.native.as_str()).collect();
+    let words: Vec<String> = pkgs.iter().map(&arg).collect();
+    let all: Vec<&str> = words.iter().map(String::as_str).collect();
     let outcome = |p: &PkgSpec, r: std::result::Result<(), String>| Outcome {
         logical: p.logical.clone(),
         result: r,
@@ -155,8 +164,8 @@ pub fn batch_then_each(
     cx.ui
         .warn(format!("批量执行失败（退出码 {code}），逐个重试"));
     let mut out = Vec::new();
-    for p in pkgs {
-        let cmd = match prepare(&[p.native.as_str()]) {
+    for (p, word) in pkgs.iter().zip(&words) {
+        let cmd = match prepare(&[word.as_str()]) {
             Ok(c) => c,
             Err(why) => {
                 out.push(outcome(p, Err(why)));

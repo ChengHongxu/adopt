@@ -149,6 +149,44 @@ pub fn apply(
     Ok(report)
 }
 
+/// Apply `plan`, then pick up package managers the apply itself made available (pixi
+/// installing nodejs brings npm) and give just those one more collect → reconcile →
+/// apply round, so a fresh machine converges in a single run. Returns the adapters now
+/// in use and the merged report.
+pub fn apply_and_follow_up(
+    app: &App,
+    shared: &crate::state::Shared,
+    local: &mut Local,
+    adapters: Vec<Box<dyn Adapter>>,
+    plan: &Plan,
+    policy: RootPolicy,
+) -> Result<(Vec<Box<dyn Adapter>>, Report)> {
+    let mut report = apply(app, local, &adapters, plan, policy)?;
+    if app.dry_run || report.done.is_empty() {
+        return Ok((adapters, report));
+    }
+    let known: Vec<_> = adapters.iter().map(|a| a.id()).collect();
+    let (old, new): (Vec<_>, Vec<_>) = app
+        .adapters()
+        .into_iter()
+        .partition(|a| known.contains(&a.id()));
+    if new.is_empty() {
+        return Ok((adapters, report));
+    }
+    let names: Vec<_> = new.iter().map(|a| a.id().to_string()).collect();
+    app.ui
+        .line(format!("刚装好了 {}，继续同步它的条目", names.join("、")));
+    let inv = crate::plan::Inventory::collect(&new, &app.ctx())?;
+    let more = crate::plan::reconcile(shared, local, &inv)?;
+    let extra = apply(app, local, &new, &more, policy)?;
+    report.done.extend(extra.done);
+    report.failed += extra.failed;
+    report.skipped += extra.skipped;
+    let mut all = old;
+    all.extend(new);
+    Ok((all, report))
+}
+
 /// Whether root changes may go ahead: privilege is available and, under
 /// [`RootPolicy::Confirm`], the user said yes to the exact commands. The inner
 /// error says why not; the outer one is Ctrl-C.

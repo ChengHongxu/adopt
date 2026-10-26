@@ -49,7 +49,13 @@ impl Apt {
     }
 
     fn change(&self, cx: &Ctx, pkgs: &[PkgSpec], op: Op) -> Result<Vec<Outcome>> {
-        super::batch_then_each(cx, pkgs, |names| Self::apt_get(op, names), true)
+        super::batch_then_each(
+            cx,
+            pkgs,
+            |p| p.native.clone(),
+            |names| Self::apt_get(op, names),
+            true,
+        )
     }
 }
 

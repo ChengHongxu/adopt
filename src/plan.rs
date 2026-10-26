@@ -102,8 +102,8 @@ pub fn find_new(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Vec<N
             });
         }
     }
-    // pixi first, then system, so quick claims come before long apt lists.
-    out.sort_by_key(|n| (n.section() != Section::Pixi, n.manager, n.native.clone()));
+    // pixi and npm first, then system, so quick claims come before long apt lists.
+    out.sort_by_key(|n| (n.section() == Section::System, n.manager, n.native.clone()));
     Ok(out)
 }
 
@@ -246,32 +246,33 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
         for (logical, w) in &want {
             let prev = applied.get(logical).filter(|a| a.manager == manager);
             let present = installed.names.contains(&w.native)
-                || (untracked(&w.native) && prev.is_some_and(|a| a.native == w.native));
+                || (untracked(manager, &w.native) && prev.is_some_and(|a| a.native == w.native));
             let current = installed.tables.get(&w.native);
             if present && failed.contains_key(logical) {
                 act(Action::ClearFailed {
                     logical: logical.clone(),
                 });
             }
+            let mark = |by_adopt: bool, fp: Option<String>| Action::MarkApplied {
+                logical: logical.clone(),
+                applied: Applied {
+                    manager,
+                    native: w.native.clone(),
+                    by_adopt,
+                    fp,
+                },
+            };
+            let want_fp = w.body.as_ref().map(fingerprint);
             match (present, prev) {
-                (true, prev) => {
+                // pixi: the machine keeps its own copy of the body (the env table).
+                (true, prev) if current.is_some() => {
                     let cur_fp = current.map(fingerprint);
-                    let want_fp = w.body.as_ref().map(fingerprint);
-                    let mark = |by_adopt: bool| Action::MarkApplied {
-                        logical: logical.clone(),
-                        applied: Applied {
-                            manager,
-                            native: w.native.clone(),
-                            by_adopt,
-                            fp: cur_fp.clone(),
-                        },
-                    };
                     if cur_fp == want_fp {
                         // In place and identical: just make sure the record is current.
                         let up_to_date =
                             prev.is_some_and(|a| a.native == w.native && a.fp == cur_fp);
                         if !up_to_date {
-                            act(mark(prev.is_some_and(|a| a.by_adopt)));
+                            act(mark(prev.is_some_and(|a| a.by_adopt), cur_fp));
                         }
                     } else if prev.is_some_and(|a| a.fp.is_some() && a.fp == cur_fp) {
                         // Untouched here since we last wrote it: take the new shared version.
@@ -284,6 +285,16 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
                         });
                     }
                 }
+                // Everything else: the body (npm `version`) only exists in the manifest.
+                // Only a change there since the last apply counts, never what is
+                // installed, so a tool updating itself is not "corrected" back.
+                (true, prev) => match prev {
+                    Some(a) if a.native == w.native && a.fp == want_fp => {}
+                    Some(a) if a.native == w.native && a.fp.is_some() => {
+                        act(Action::Update(w.clone()));
+                    }
+                    _ => act(mark(prev.is_some_and(|a| a.by_adopt), want_fp)),
+                },
                 (false, Some(_)) => plan.pending.push(Pending::Missing {
                     manager,
                     want: w.clone(),
@@ -304,7 +315,8 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
             if want.contains_key(logical) || a.manager != manager {
                 continue;
             }
-            if a.by_adopt && (installed.names.contains(&a.native) || untracked(&a.native)) {
+            if a.by_adopt && (installed.names.contains(&a.native) || untracked(manager, &a.native))
+            {
                 act(Action::Remove {
                     logical: logical.clone(),
                     native: a.native.clone(),
@@ -327,9 +339,9 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
 }
 
 /// dnf groups (`@development-tools`) never show up in the user-installed list, so for
-/// them "installed" can only mean "adopt applied it".
-fn untracked(native: &str) -> bool {
-    native.starts_with('@')
+/// them "installed" can only mean "adopt applied it". (npm's `@scope/name` is listed.)
+fn untracked(manager: ManagerId, native: &str) -> bool {
+    manager == ManagerId::Dnf && native.starts_with('@')
 }
 
 /// Everything waiting for the user: new packages, pending items, and changes `sync`
@@ -560,5 +572,63 @@ mod tests {
         )
         .unwrap();
         assert!(summary(&p).is_empty(), "{:?}", summary(&p));
+    }
+
+    fn npm(installed: &[&str]) -> Inventory {
+        let mut inv = Inventory::default();
+        inv.sections.insert(
+            Section::Npm,
+            (
+                ManagerId::Npm,
+                Installed {
+                    names: installed.iter().map(|s| s.to_string()).collect(),
+                    tables: BTreeMap::new(),
+                },
+            ),
+        );
+        inv
+    }
+
+    fn npm_applied(l: &mut Local, name: &str, manifest: &str) {
+        let s = shared(manifest);
+        let fp = s.entries(Section::Npm).unwrap()[0]
+            .body
+            .as_ref()
+            .map(fingerprint);
+        l.set_applied(
+            Section::Npm,
+            name,
+            &Applied {
+                manager: ManagerId::Npm,
+                native: name.into(),
+                by_adopt: true,
+                fp,
+            },
+        );
+    }
+
+    #[test]
+    fn npm_version_change_updates_only_when_the_manifest_moves() {
+        let v1 = "[npm.pyright]\nversion = \"^1.1\"\n";
+        let mut l = local("");
+        npm_applied(&mut l, "pyright", v1);
+        // Installed, manifest unchanged: nothing, whatever version is on disk.
+        assert!(summary(&reconcile(&shared(v1), &l, &npm(&["pyright"])).unwrap()).is_empty());
+        let v2 = "[npm.pyright]\nversion = \"^2\"\n";
+        let p = reconcile(&shared(v2), &l, &npm(&["pyright"])).unwrap();
+        assert_eq!(summary(&p), ["update pyright"]);
+        let unpinned = "[npm.pyright]\n";
+        let p = reconcile(&shared(unpinned), &l, &npm(&["pyright"])).unwrap();
+        assert_eq!(summary(&p), ["update pyright"]);
+    }
+
+    #[test]
+    fn npm_found_installed_is_recorded_not_reinstalled() {
+        let s = shared("[npm.\"@openai/codex\"]\n");
+        let p = reconcile(&s, &local(""), &npm(&["@openai/codex"])).unwrap();
+        assert_eq!(summary(&p), ["mark @openai/codex by_adopt=false"]);
+        // A scoped npm name is not a dnf group: absent means absent.
+        let p = reconcile(&s, &local(""), &npm(&[])).unwrap();
+        assert_eq!(summary(&p), ["install @openai/codex"]);
     }
 }

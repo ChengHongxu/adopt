@@ -129,11 +129,23 @@ impl Adapter for Dnf {
     }
 
     fn install(&self, cx: &Ctx, pkgs: &[PkgSpec]) -> Result<Vec<Outcome>> {
-        super::batch_then_each(cx, pkgs, |n| Self::dnf(Op::Install, n), true)
+        super::batch_then_each(
+            cx,
+            pkgs,
+            |p| p.native.clone(),
+            |n| Self::dnf(Op::Install, n),
+            true,
+        )
     }
 
     fn remove(&self, cx: &Ctx, pkgs: &[PkgSpec]) -> Result<Vec<Outcome>> {
-        super::batch_then_each(cx, pkgs, |n| Self::dnf(Op::Remove, n), true)
+        super::batch_then_each(
+            cx,
+            pkgs,
+            |p| p.native.clone(),
+            |n| Self::dnf(Op::Remove, n),
+            true,
+        )
     }
 }
 

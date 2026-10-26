@@ -9,15 +9,18 @@ pub enum Section {
     System,
     /// pixi global environments.
     Pixi,
+    /// npm global packages (`npm install -g`).
+    Npm,
 }
 
 impl Section {
-    pub const ALL: [Section; 2] = [Section::System, Section::Pixi];
+    pub const ALL: [Section; 3] = [Section::System, Section::Pixi, Section::Npm];
 
     pub fn key(self) -> &'static str {
         match self {
             Section::System => "system",
             Section::Pixi => "pixi",
+            Section::Npm => "npm",
         }
     }
 
@@ -38,14 +41,16 @@ pub enum ManagerId {
     Dnf,
     Brew,
     Pixi,
+    Npm,
 }
 
 impl ManagerId {
-    pub const ALL: [ManagerId; 4] = [
+    pub const ALL: [ManagerId; 5] = [
         ManagerId::Apt,
         ManagerId::Dnf,
         ManagerId::Brew,
         ManagerId::Pixi,
+        ManagerId::Npm,
     ];
     /// Managers whose per-package name overrides may appear in a `[system.*]` entry.
     pub const SYSTEM: [ManagerId; 3] = [ManagerId::Apt, ManagerId::Dnf, ManagerId::Brew];
@@ -56,6 +61,7 @@ impl ManagerId {
             ManagerId::Dnf => "dnf",
             ManagerId::Brew => "brew",
             ManagerId::Pixi => "pixi",
+            ManagerId::Npm => "npm",
         }
     }
 
@@ -67,6 +73,7 @@ impl ManagerId {
         match self {
             ManagerId::Apt | ManagerId::Dnf | ManagerId::Brew => Section::System,
             ManagerId::Pixi => Section::Pixi,
+            ManagerId::Npm => Section::Npm,
         }
     }
 }

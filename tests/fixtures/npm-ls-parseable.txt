@@ -1,0 +1,6 @@
+/tmp/adopt-npmfix.0cyycs/prefix/lib
+/tmp/adopt-npmfix.0cyycs/prefix/lib/node_modules/@anthropic-ai/claude-code
+/tmp/adopt-npmfix.0cyycs/prefix/lib/node_modules/@openai/codex
+/tmp/adopt-npmfix.0cyycs/prefix/lib/node_modules/corepack
+/tmp/adopt-npmfix.0cyycs/prefix/lib/node_modules/npm
+/tmp/adopt-npmfix.0cyycs/prefix/lib/node_modules/pyright

@@ -21,6 +21,7 @@ const TEMPLATE: &str = "\
 #   brew = false        这个管理器不装
 #   groups = [\"work\"]   只装到这些分组的机器（不写就是所有机器）
 # [pixi.<env>]         pixi global 环境，原样保存 pixi-global.toml 里的表
+# [npm.\"<包名>\"]       npm 全局包，带 scope 的名字要加引号；可写 version = \"^1.1\"
 
 version = 1
 ";

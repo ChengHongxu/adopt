@@ -49,6 +49,13 @@ pub struct FakeSystem {
     pub brew: RefCell<FakePm>,
     /// chezmoi's source dir; `None` means chezmoi is not installed.
     pub chezmoi_source: RefCell<Option<PathBuf>>,
+    /// npm's global prefix (what `npm prefix -g` prints). Packages live on disk in
+    /// `<prefix>/lib/node_modules`, so directory mtimes behave like the real thing.
+    pub npm_prefix: RefCell<PathBuf>,
+    /// npm: names `npm install -g` can find. Anything else fails.
+    pub npm_registry: RefCell<BTreeSet<String>>,
+    /// Exit code for `npm install -g`, overriding the registry check.
+    pub npm_install_code: RefCell<Option<i32>>,
     /// Every non-git command run, as displayed.
     pub log: RefCell<Vec<String>>,
 }
@@ -196,6 +203,81 @@ impl FakeSystem {
         0
     }
 
+    fn npm_modules(&self) -> PathBuf {
+        self.npm_prefix.borrow().join("lib/node_modules")
+    }
+
+    /// Names installed in the fake prefix, `@scope/name` included.
+    pub fn npm_installed(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let Ok(top) = fs::read_dir(self.npm_modules()) else {
+            return out;
+        };
+        for e in top.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('@') {
+                for s in fs::read_dir(e.path()).into_iter().flatten().flatten() {
+                    out.insert(format!("{name}/{}", s.file_name().to_string_lossy()));
+                }
+            } else {
+                out.insert(name);
+            }
+        }
+        out
+    }
+
+    /// Put a package on disk the way npm does (`version` goes into package.json).
+    pub fn npm_put(&self, spec: &str) {
+        let (name, version) = split_npm_spec(spec);
+        let dir = self.npm_modules().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            format!(
+                "{{\"name\":\"{name}\",\"version\":\"{}\"}}\n",
+                version.unwrap_or("1.0.0")
+            ),
+        )
+        .unwrap();
+    }
+
+    fn npm_cmd(&self, cmd: &Cmd, args: &[&str]) -> i32 {
+        if cmd.program == "sudo" {
+            return 1; // adopt must never run npm as root
+        }
+        match args {
+            ["install", "-g", specs @ ..] if !specs.is_empty() => {
+                if let Some(code) = *self.npm_install_code.borrow() {
+                    return code;
+                }
+                let reg = self.npm_registry.borrow().clone();
+                if specs.iter().any(|s| !reg.contains(split_npm_spec(s).0)) {
+                    return 1; // E404 Not Found
+                }
+                for s in specs {
+                    self.npm_put(s);
+                }
+                0
+            }
+            ["uninstall", "-g", names @ ..] if !names.is_empty() => {
+                for n in names {
+                    let dir = self.npm_modules().join(n);
+                    let _ = fs::remove_dir_all(&dir);
+                    // npm removes an emptied scope directory too.
+                    if let Some(scope) = dir.parent().filter(|p| *p != self.npm_modules()) {
+                        let _ = fs::remove_dir(scope);
+                    }
+                }
+                0
+            }
+            _ => 64,
+        }
+    }
+
+    pub fn which_npm(&self) -> bool {
+        self.which("npm")
+    }
+
     pub fn ran(&self, needle: &str) -> bool {
         self.log.borrow().iter().any(|l| l.contains(needle))
     }
@@ -266,6 +348,21 @@ impl CommandRunner for FakeSystem {
                 }
             }
             ("chezmoi", ["apply", "--no-tty"]) => Output::ok(""),
+            ("npm", ["prefix", "-g"]) => {
+                Output::ok(format!("{}\n", self.npm_prefix.borrow().display()))
+            }
+            ("npm", ["ls", "-g", "--depth=0", "--parseable"]) => {
+                let lib = self.npm_prefix.borrow().join("lib");
+                if !lib.is_dir() {
+                    Output::fail(254, include_str!("../fixtures/npm-ls-enoent.stderr.txt"))
+                } else {
+                    let mut s = format!("{}\n", lib.display());
+                    for n in self.npm_installed() {
+                        s.push_str(&format!("{}\n", self.npm_modules().join(n).display()));
+                    }
+                    Output::ok(s)
+                }
+            }
             ("apt-mark", ["showmanual"]) => {
                 let mut s = String::new();
                 for n in self.apt_manual.borrow().iter() {
@@ -286,7 +383,20 @@ impl CommandRunner for FakeSystem {
         self.log.borrow_mut().push(cmd.to_string());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         Ok(match (program, args.as_slice()) {
-            ("pixi", ["global", "sync"]) => *self.pixi_sync_code.borrow(),
+            ("pixi", ["global", "sync"]) => {
+                let code = *self.pixi_sync_code.borrow();
+                // A `nodejs` env exposes node/npm/npx, as on a real machine.
+                let manifest = self.base.join("home/.pixi/manifests/pixi-global.toml");
+                if code == 0
+                    && fs::read_to_string(manifest).is_ok_and(|m| m.contains("[envs.nodejs]"))
+                {
+                    self.programs
+                        .borrow_mut()
+                        .extend(["node", "npm"].map(String::from));
+                }
+                code
+            }
+            ("npm", a) => self.npm_cmd(cmd, a),
             ("apt-get", a) => self.apt_get(cmd, a),
             ("sh", a) => self.sh(a),
             ("chezmoi", ["apply"]) => 0,
@@ -428,6 +538,9 @@ impl Env {
             uid: RefCell::new(1000),
             sudo_ok: RefCell::new(true),
             chezmoi_source: RefCell::new(None),
+            npm_prefix: RefCell::new(base.join("home/.local")),
+            npm_registry: RefCell::default(),
+            npm_install_code: RefCell::new(None),
             dnf: RefCell::default(),
             dnf5: RefCell::new(true),
             brew: RefCell::default(),
@@ -514,6 +627,46 @@ impl Env {
             repo.iter().chain(manual).map(|s| s.to_string()).collect();
         drop(p);
         self.sys.touch_dpkg();
+    }
+
+    /// Give this machine npm with a user prefix (`~/.local`, as `~/.npmrc` would set)
+    /// and `installed` already there. `registry` is what `npm install -g` can find.
+    pub fn with_npm(&self, installed: &[&str], registry: &[&str]) {
+        self.sys
+            .programs
+            .borrow_mut()
+            .extend(["node", "npm"].map(String::from));
+        fs::create_dir_all(self.sys.npm_modules()).unwrap();
+        for n in installed {
+            self.sys.npm_put(n);
+        }
+        // Bundled with node; never offered for claiming.
+        self.sys.npm_put("npm");
+        self.sys.npm_put("corepack");
+        let mut reg = self.sys.npm_registry.borrow_mut();
+        reg.extend(registry.iter().chain(installed).map(|s| s.to_string()));
+    }
+
+    /// The user runs `npm install -g <spec>` by hand.
+    pub fn npm_add(&self, spec: &str) {
+        self.sys.npm_put(spec);
+    }
+
+    pub fn npm_installed(&self, name: &str) -> bool {
+        self.sys.npm_installed().contains(name)
+    }
+
+    /// Version npm has on disk for `name`.
+    pub fn npm_version(&self, name: &str) -> String {
+        let p = self.sys.npm_modules().join(name).join("package.json");
+        let text = self.read(&p);
+        text.split("\"version\":\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_string()
     }
 
     /// Install chezmoi, using the dotfiles checkout as its source dir.
@@ -726,3 +879,15 @@ channels = ["conda-forge"]
 dependencies = { ripgrep = "*" }
 exposed = { rg = "rg" }
 "#;
+
+/// `@scope/name@^1` -> (`@scope/name`, Some(`^1`)); `name` -> (`name`, None).
+pub fn split_npm_spec(spec: &str) -> (&str, Option<&str>) {
+    let start = usize::from(spec.starts_with('@'));
+    match spec[start..].find('@') {
+        Some(i) => (&spec[..start + i], Some(&spec[start + i + 1..])),
+        None => (spec, None),
+    }
+}
+
+/// `[pixi.nodejs]` as in the README: exposes node, npm, npx.
+pub const PIXI_NODEJS: &str = "[pixi.nodejs]\nchannels = [\"conda-forge\"]\ndependencies = { nodejs = \"24.*\" }\nexposed = { node = \"node\", npm = \"npm\", npx = \"npx\" }\n";

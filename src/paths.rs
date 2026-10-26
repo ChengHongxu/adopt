@@ -16,6 +16,8 @@ pub struct Paths {
     pub pixi_manifest: PathBuf,
     /// Prefix for system files (`/var/lib/dpkg/status`, ...). `/` in production.
     pub root: PathBuf,
+    /// `NPM_CONFIG_PREFIX` / `npm_config_prefix` from the environment, if set.
+    pub npm_prefix_env: Option<PathBuf>,
 }
 
 impl Paths {
@@ -37,6 +39,10 @@ impl Paths {
             cache_dir: xdg("XDG_CACHE_HOME", ".cache").join("adopt"),
             pixi_manifest: pixi_home.join("manifests").join("pixi-global.toml"),
             root: PathBuf::from("/"),
+            npm_prefix_env: ["NPM_CONFIG_PREFIX", "npm_config_prefix"]
+                .iter()
+                .find_map(|v| std::env::var_os(v).filter(|v| !v.is_empty()))
+                .map(PathBuf::from),
             home,
         })
     }
@@ -49,6 +55,7 @@ impl Paths {
             cache_dir: home.join(".cache/adopt"),
             pixi_manifest: home.join(".pixi/manifests/pixi-global.toml"),
             root: base.join("root"),
+            npm_prefix_env: None,
             home,
         }
     }

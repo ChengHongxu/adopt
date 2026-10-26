@@ -76,11 +76,23 @@ impl Adapter for Brew {
     }
 
     fn install(&self, cx: &Ctx, pkgs: &[PkgSpec]) -> Result<Vec<Outcome>> {
-        super::batch_then_each(cx, pkgs, |n| Self::brew(Op::Install, n), false)
+        super::batch_then_each(
+            cx,
+            pkgs,
+            |p| p.native.clone(),
+            |n| Self::brew(Op::Install, n),
+            false,
+        )
     }
 
     fn remove(&self, cx: &Ctx, pkgs: &[PkgSpec]) -> Result<Vec<Outcome>> {
-        super::batch_then_each(cx, pkgs, |n| Self::brew(Op::Remove, n), false)
+        super::batch_then_each(
+            cx,
+            pkgs,
+            |p| p.native.clone(),
+            |n| Self::brew(Op::Remove, n),
+            false,
+        )
     }
 }
 

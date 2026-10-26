@@ -153,7 +153,14 @@ pub fn run(app: &App) -> Result<()> {
     let adapters = app.adapters();
     let inv = Inventory::collect(&adapters, &app.ctx())?;
     let plan = plan::reconcile(&s.shared, &s.local, &inv)?;
-    let report = apply::apply(app, &mut s.local, &adapters, &plan, RootPolicy::Confirm)?;
+    let (adapters, report) = apply::apply_and_follow_up(
+        app,
+        &s.shared,
+        &mut s.local,
+        adapters,
+        &plan,
+        RootPolicy::Confirm,
+    )?;
     if let Some(line) = apply::summary(&report) {
         app.ui.ok(line);
     }
@@ -277,6 +284,8 @@ fn entry_for(item: &NewItem) -> Entry {
     match item.section() {
         Section::Pixi => Entry::pixi(&item.native, item.body.clone().unwrap_or_default()),
         Section::System => Entry::system(&item.native),
+        // Claimed unpinned: the user decides later whether a version is worth pinning.
+        Section::Npm => Entry::npm(&item.native),
     }
 }
 
@@ -285,7 +294,7 @@ fn mark_applied(local: &mut Local, item: &NewItem) {
         manager: item.manager,
         native: item.native.clone(),
         by_adopt: false,
-        fp: item.body.as_ref().map(fingerprint),
+        fp: entry_for(item).body.as_ref().map(fingerprint),
     };
     local.set_applied(item.section(), &item.native, &applied);
 }

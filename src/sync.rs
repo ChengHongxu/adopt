@@ -49,14 +49,34 @@ pub fn run(app: &App, args: &SyncArgs) -> Result<()> {
     }
 
     // Without --yes the user has just confirmed the full commands, sudo included.
-    let report = apply::apply(app, &mut s.local, &adapters, &plan, RootPolicy::Allow)?;
+    let (adapters, report) = apply::apply_and_follow_up(
+        app,
+        &s.shared,
+        &mut s.local,
+        adapters,
+        &plan,
+        RootPolicy::Allow,
+    )?;
     if !app.dry_run && s.local.file.is_dirty() {
         s.local.file.save()?;
     }
     crate::status::refresh(app);
 
-    let new_count = plan::find_new(&s.shared, &s.local, &inv)?.len();
-    let waiting = plan.pending.len() + report.failed + new_count;
+    // Count what is left against the machine as it is now (an adapter may have appeared).
+    let (pending, new_count) = if app.dry_run {
+        (
+            plan.pending.len(),
+            plan::find_new(&s.shared, &s.local, &inv)?.len(),
+        )
+    } else {
+        let inv = Inventory::collect(&adapters, &app.ctx())?;
+        let after = plan::reconcile(&s.shared, &s.local, &inv)?;
+        (
+            after.pending.len(),
+            plan::find_new(&s.shared, &s.local, &inv)?.len(),
+        )
+    };
+    let waiting = pending + new_count;
     match apply::summary(&report) {
         Some(line) => ui.ok(line),
         None if waiting == 0 && report.skipped == 0 => ui.ok("软件清单与本机一致"),

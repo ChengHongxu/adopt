@@ -17,9 +17,9 @@ $ adopt
 ✔ 已提交并推送：+ripgrep(pixi) +htop(apt) ~zshrc
 ```
 
-平时照常用 `apt install`、`dnf install`、`brew install`、`pixi global install` 装软件，不需要任何包装命令，也不用事先决定要不要同步。adopt 对比"本机实际装了什么"和"清单里有什么"，把差异列出来让你一次分好类，然后自动提交并推送。其他机器用 `adopt sync --yes` 拉取并应用。
+平时照常用 `apt install`、`dnf install`、`brew install`、`pixi global install`、`npm install -g` 装软件，不需要任何包装命令，也不用事先决定要不要同步。adopt 对比"本机实际装了什么"和"清单里有什么"，把差异列出来让你一次分好类，然后自动提交并推送。其他机器用 `adopt sync --yes` 拉取并应用。
 
-支持的包管理器：apt、dnf（dnf4 和 dnf5）、Homebrew（formula，暂不支持 cask）、pixi global。每台机器只用一个系统包管理器，按 apt、dnf、brew 的顺序选。
+支持的包管理器：apt、dnf（dnf4 和 dnf5）、Homebrew（formula，暂不支持 cask）、pixi global、npm 全局包。每台机器只用一个系统包管理器，按 apt、dnf、brew 的顺序选；应用时先系统包，再 pixi，最后 npm（node 通常由 pixi 提供）。
 
 ## 安装
 
@@ -48,7 +48,7 @@ adopt init     # 选 dotfiles 仓库（默认取 chezmoi 源目录）、设本�
 adopt          # 以后每次装完软件跑一下
 ```
 
-`init` 会把系统包管理器当前列出的几百个包记为基线，之后只关心基线以外新装的。pixi 和 brew 不记基线，已有的会在第一次运行 `adopt` 时逐个问你。
+`init` 会把系统包管理器当前列出的几百个包记为基线，之后只关心基线以外新装的。pixi、npm 和 brew 不记基线，已有的会在第一次运行 `adopt` 时逐个问你。
 
 其他机器：
 
@@ -86,6 +86,9 @@ adopt sync --yes
 - 从共享清单删掉的：只有当初是 adopt 装的才卸载；adopt 之前就装着的只是不再跟踪
 - 安装失败：记下来，同一个名字不再自动重试；改了包名映射后才会再试
 - pixi 环境：清单更新、本机没改过就更新；本机改过就保留本机版本，等你决定
+- npm 包：adopt 从不主动升级。只有清单里这个条目的 `version` 变了（相对上次应用时），才执行一次 `npm install -g 名字@新version`；已装版本和 `version` 不一致不算改动，所以 Claude Code 这类会自我更新的工具，以及 `npm update -g`，都不会被改回去
+- npm prefix 不合适（在 pixi 环境里，或不可写）：这些 npm 条目记为失败并给出提示，不用 sudo，其他条目照常应用
+- 同一次运行中新出现的包管理器：比如新机器上 pixi 刚装好 nodejs，`npm` 才可用。apply 完会重新检测，对新出现的包管理器再做一轮，npm 条目在同一次 sync 里就装上
 - 拿不到 sudo：跳过系统包并给出提示，pixi 照常应用，不报错退出
 - pull 失败：给出警告，用本地的清单继续
 - push 被拒：先 `pull --rebase` 再推；还失败就停下来，提交留在本地，绝不强推
@@ -108,7 +111,34 @@ groups = ["work"]                   # 只装到这些分组的机器；不写就
 channels = ["https://chenghongxu.github.io/packages/conda", "conda-forge"]
 dependencies = { setproxy = "*" }
 exposed = { setproxy = "setproxy" }
+
+[pixi.nodejs]                       # npm 包需要的 node/npm 由 pixi 提供
+channels = ["conda-forge"]
+dependencies = { nodejs = "24.*" }
+exposed = { node = "node", npm = "npm", npx = "npx" }
+
+[npm."@anthropic-ai/claude-code"]   # 键就是 npm 包名，带 scope 的要加引号
+
+[npm."@openai/codex"]
+
+[npm.pyright]
+version = "^1.1"                    # 可选，npm 的 semver 范围；不写就是 latest
+groups = ["work"]
 ```
+
+npm 条目只认 `version` 和 `groups`，名字原样使用 `npm ls -g` 里的包名，不做名字映射。认领手动装的包时写成空表，不锁版本。
+
+### npm 的全局 prefix
+
+adopt 不决定 npm 装到哪里，也不设置 `NPM_CONFIG_PREFIX`，一切以 `npm prefix -g` 为准。但 node 来自 pixi 时，npm 默认的全局 prefix 就是那个 pixi 环境（`~/.pixi/envs/nodejs`），pixi 重建或升级环境时装在里面的包会丢失。所以请在 `~/.npmrc` 里把 prefix 设到用户目录：
+
+```ini
+prefix=${HOME}/.local
+```
+
+这样包装到 `~/.local/lib/node_modules`，命令在 `~/.local/bin`（确保它在 `PATH` 里）。prefix 在 pixi 环境里或不可写（比如 `/usr`）时，adopt 不会安装 npm 条目，也不会用 sudo，只给出上面的提示。
+
+定时器或 cron 里 `PATH` 可能只有 `~/.pixi/bin:/usr/bin:/bin`，这没问题：pixi 暴露的 `npm` 启动时会把 nodejs 环境的 `bin` 加进 `PATH`，包的 postinstall 脚本能找到 `node`。
 
 如果 dotfiles 仓库就是 chezmoi 的源目录，`init` 会把 `packages.toml` 加进 `.chezmoiignore`，免得它被当成 `~/packages.toml`。
 
@@ -118,7 +148,9 @@ exposed = { setproxy = "setproxy" }
 
 ## 提示符（starship）
 
-`adopt status --prompt` 用缓存：只比较两份清单的内容和几个系统文件（`/var/lib/dpkg/status`、rpm 数据库、brew 的 Cellar、pixi 清单）的修改时间和大小，有变化才调用包管理器重新计算。
+`adopt status --prompt` 用缓存：只比较两份清单的内容和几个系统文件（`/var/lib/dpkg/status`、rpm 数据库、brew 的 Cellar、pixi 清单、npm 的 `node_modules`）的修改时间和大小，有变化才调用包管理器重新计算。缓存命中时不启动任何进程。
+
+npm 的 prefix 不启动 node 来取（那要几百毫秒）：依次看 `NPM_CONFIG_PREFIX`、`~/.npmrc` 里的 `prefix=`（展开 `~` 和 `${HOME}`），最后是上次运行 `npm ls -g` 时记下的 prefix（`~/.cache/adopt/npm-prefix`）。都拿不到就不监视 npm。监视的是 `<prefix>/lib/node_modules` 和其下每个 `@scope` 目录：往已有的 scope 里再装一个包时，只有 scope 目录的修改时间会变。
 
 ```toml
 # ~/.config/starship.toml
@@ -177,7 +209,7 @@ runcmd:
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-测试不会碰本机真实的 `~/.pixi`、系统软件或 chezmoi 目录：所有外部命令都经过 `CommandRunner` trait，测试里换成模拟 apt/dnf/brew/pixi/chezmoi 的假实现，HOME 和 dotfiles 仓库都在临时目录里。git 是真实执行的，但用的是临时目录里的仓库和隔离的配置。
+测试不会碰本机真实的 `~/.pixi`、npm prefix、系统软件或 chezmoi 目录：所有外部命令都经过 `CommandRunner` trait，测试里换成模拟 apt/dnf/brew/pixi/npm/chezmoi 的假实现，HOME 和 dotfiles 仓库都在临时目录里。git 是真实执行的，但用的是临时目录里的仓库和隔离的配置。
 
 `tests/e2e/run.sh` 在 Docker 容器里用真实的 apt 或 dnf 跑一遍 init、认领检测和 sync 的三条规则。CI 在 debian:stable、fedora:latest（dnf5）、rockylinux:9（dnf4）里跑它。它会真实装卸软件，只能在一次性容器里运行：
 
@@ -187,7 +219,7 @@ docker run --rm -v "$PWD:/src:ro" fedora:latest \
   sh /src/tests/e2e/run.sh /src/target/x86_64-unknown-linux-musl/release/adopt
 ```
 
-依赖保持最少：clap、toml_edit（读写都用它，保留注释和格式）、anyhow、dialoguer（加上它本身依赖的 console）。没选 inquire，因为 dialoguer 的依赖树小得多（不拉 crossterm），需要的确认、输入、多选它都有。
+依赖保持最少：clap、toml_edit（读写都用它，保留注释和格式）、anyhow、dialoguer（加上它本身依赖的 console）。npm 适配器解析 `npm ls -g --parseable` 的纯文本输出，没有为 `--json` 引入 serde_json。没选 inquire，因为 dialoguer 的依赖树小得多（不拉 crossterm），需要的确认、输入、多选它都有。
 
 ## 发布
 

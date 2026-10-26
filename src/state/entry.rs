@@ -1,5 +1,5 @@
-//! One package entry, as written under `[system.<name>]` or `[pixi.<name>]` in
-//! packages.toml, or under `[local.system.<name>]` in local.toml.
+//! One package entry, as written under `[system.<name>]`, `[pixi.<name>]` or
+//! `[npm.<name>]` in packages.toml, or under `[local.system.<name>]` in local.toml.
 
 use std::collections::BTreeMap;
 
@@ -11,6 +11,8 @@ use crate::model::{ManagerId, Section};
 
 /// Keys adopt owns inside an entry; everything else in a pixi entry is pixi's.
 pub const GROUPS: &str = "groups";
+/// Npm: the semver range to install (`npm install -g name@<version>`).
+pub const VERSION: &str = "version";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mapping {
@@ -29,7 +31,8 @@ pub struct Entry {
     pub groups: Option<Vec<String>>,
     /// System entries only.
     pub mappings: BTreeMap<ManagerId, Mapping>,
-    /// Pixi entries only: the env table exactly as pixi writes it, minus `groups`.
+    /// Pixi: the env table exactly as pixi writes it, minus `groups`.
+    /// Npm: a table holding only `version`, if the entry pins one.
     pub body: Option<Table>,
 }
 
@@ -52,6 +55,22 @@ impl Entry {
             mappings: BTreeMap::new(),
             body: Some(body),
         }
+    }
+
+    /// Unpinned: whatever `npm install -g <name>` picks.
+    pub fn npm(name: &str) -> Entry {
+        Entry {
+            section: Section::Npm,
+            name: name.into(),
+            groups: None,
+            mappings: BTreeMap::new(),
+            body: Some(Table::new()),
+        }
+    }
+
+    /// Npm: the pinned semver range.
+    pub fn version(&self) -> Option<&str> {
+        self.body.as_ref()?.get(VERSION)?.as_str()
     }
 
     pub fn with_groups(mut self, groups: Option<Vec<String>>) -> Entry {
@@ -111,6 +130,24 @@ impl Entry {
                 let mut body = table;
                 body.remove(GROUPS);
                 detach(&mut body);
+                entry.body = Some(body);
+            }
+            Section::Npm => {
+                let mut body = Table::new();
+                for (k, v) in table.iter() {
+                    match k {
+                        GROUPS => {}
+                        VERSION => match v.as_str() {
+                            Some(s) if !s.trim().is_empty() => {
+                                body.insert(VERSION, Item::Value(Value::from(s.trim())));
+                            }
+                            _ => bail!(
+                                "[npm.{name}] 的 version 必须是非空字符串，例如 version = \"^1.1\""
+                            ),
+                        },
+                        other => bail!("[npm.{name}] 不支持 {other}，只能写 version 和 groups"),
+                    }
+                }
                 entry.body = Some(body);
             }
         }
@@ -263,6 +300,54 @@ groups = ["homelab"]
             !text.contains("[system]\n"),
             "parent stays implicit: {text}"
         );
+    }
+
+    #[test]
+    fn npm_scoped_names_round_trip() {
+        let src = "version = 1\n\n[npm.\"@anthropic-ai/claude-code\"]\n\n[npm.pyright]\nversion = \"^1.1\" # pinned\ngroups = [\"work\"]\n";
+        let mut doc: DocumentMut = src.parse().unwrap();
+        let npm = parse_section(doc.as_table(), Section::Npm).unwrap();
+        assert_eq!(npm[0].name, "@anthropic-ai/claude-code");
+        assert_eq!(npm[0].version(), None);
+        assert!(npm[0].applies_to(&[]));
+        assert_eq!(npm[1].version(), Some("^1.1"));
+        assert_eq!(npm[1].groups.as_deref(), Some(&["work".to_string()][..]));
+        assert_eq!(
+            npm[0].native_for(ManagerId::Npm).as_deref(),
+            Some("@anthropic-ai/claude-code")
+        );
+
+        upsert(doc.as_table_mut(), &Entry::npm("@openai/codex"));
+        let text = doc.to_string();
+        assert!(text.contains("[npm.\"@openai/codex\"]\n"), "{text}");
+        assert!(text.contains("# pinned"), "{text}");
+        assert!(!text.contains("[npm]\n"), "{text}");
+        let back = parse_section(&text.parse::<DocumentMut>().unwrap(), Section::Npm).unwrap();
+        assert_eq!(back[2].name, "@openai/codex");
+
+        // Writing an entry back keeps its version and groups.
+        let mut doc2 = DocumentMut::new();
+        upsert(doc2.as_table_mut(), &npm[1]);
+        let t = doc2.to_string();
+        assert!(
+            t.contains("[npm.pyright]\nversion = \"^1.1\"\ngroups = [\"work\"]"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn npm_entries_only_take_version_and_groups() {
+        for bad in [
+            "[npm.x]\nversion = 1\n",
+            "[npm.x]\nversion = \"\"\n",
+            "[npm.x]\napt = \"y\"\n",
+        ] {
+            let doc: DocumentMut = bad.parse().unwrap();
+            assert!(
+                parse_section(doc.as_table(), Section::Npm).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

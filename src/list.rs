@@ -54,7 +54,10 @@ fn row(e: &Entry, manager: Option<crate::model::ManagerId>, origin: &str, note: 
     if let Some(gs) = &e.groups {
         cols.push(format!("@{}", gs.join(",")));
     }
-    if let Some(m) = manager {
+    if let Some(v) = e.version() {
+        cols.push(format!("version {v}"));
+    }
+    if let Some(m) = manager.filter(|m| m.section() == crate::model::Section::System) {
         match e.native_for(m) {
             Some(n) if n != e.name => cols.push(format!("{m}: {n}")),
             None => cols.push(format!("{m}: 不装")),
