@@ -56,6 +56,9 @@ pub struct FakeSystem {
     pub npm_registry: RefCell<BTreeSet<String>>,
     /// Exit code for `npm install -g`, overriding the registry check.
     pub npm_install_code: RefCell<Option<i32>>,
+    /// `sh -c <command>` for `[script.*]` entries: what it exits with, and the file it
+    /// creates when it succeeds. Commands not registered here exit 127.
+    pub shell: RefCell<std::collections::BTreeMap<String, (i32, Option<PathBuf>)>>,
     /// Every non-git command run, as displayed.
     pub log: RefCell<Vec<String>>,
 }
@@ -120,14 +123,33 @@ impl FakeSystem {
         fs::write(p, format!("{}\n", names.join("\n"))).unwrap();
     }
 
-    /// `sh -c 'printf ... > /etc/apt/apt.conf.d/99adopt' sh TEXT`, redirected into the sandbox.
-    fn sh(&self, args: &[&str]) -> i32 {
+    /// `sh -c 'printf ... > /etc/apt/apt.conf.d/99adopt' sh TEXT`, redirected into the
+    /// sandbox; `sh -c <script entry command>` runs what the test registered.
+    fn sh(&self, cwd: Option<&Path>, args: &[&str]) -> i32 {
         match args {
             ["-c", script, "sh", text] if script.contains("99adopt") => {
                 let p = self.base.join("root/etc/apt/apt.conf.d/99adopt");
                 fs::create_dir_all(p.parent().unwrap()).unwrap();
                 fs::write(p, text).unwrap();
                 0
+            }
+            ["-c", script] => {
+                let Some((code, creates)) = self.shell.borrow().get(*script).cloned() else {
+                    return 127;
+                };
+                if code == 0
+                    && let Some(file) = creates
+                {
+                    // Commands run in $HOME, so relative paths land there.
+                    let file = if file.is_absolute() {
+                        file
+                    } else {
+                        cwd.unwrap_or(&self.base).join(file)
+                    };
+                    fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    fs::write(&file, "").unwrap();
+                }
+                code
             }
             _ => 127,
         }
@@ -398,7 +420,7 @@ impl CommandRunner for FakeSystem {
             }
             ("npm", a) => self.npm_cmd(cmd, a),
             ("apt-get", a) => self.apt_get(cmd, a),
-            ("sh", a) => self.sh(a),
+            ("sh", a) => self.sh(cmd.cwd.as_deref(), a),
             ("chezmoi", ["apply"]) => 0,
             ("dnf", a) => self.dnf_cmd(cmd, a),
             ("brew", a) => self.brew_cmd(cmd, a),
@@ -541,6 +563,7 @@ impl Env {
             npm_prefix: RefCell::new(base.join("home/.local")),
             npm_registry: RefCell::default(),
             npm_install_code: RefCell::new(None),
+            shell: RefCell::default(),
             dnf: RefCell::default(),
             dnf5: RefCell::new(true),
             brew: RefCell::default(),
@@ -648,6 +671,15 @@ impl Env {
     }
 
     /// The user runs `npm install -g <spec>` by hand.
+    /// What `[script.*]` commands do here: `install` exits with `code`, and creates
+    /// `file` (relative to $HOME) when it succeeds.
+    pub fn with_script_cmd(&self, install: &str, code: i32, creates: Option<&str>) {
+        self.sys
+            .shell
+            .borrow_mut()
+            .insert(install.to_string(), (code, creates.map(PathBuf::from)));
+    }
+
     pub fn npm_add(&self, spec: &str) {
         self.sys.npm_put(spec);
     }

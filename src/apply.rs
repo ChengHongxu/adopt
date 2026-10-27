@@ -7,7 +7,7 @@ use crate::App;
 use crate::adapters::{Adapter, Op, PkgSpec};
 use crate::plan::{Action, Plan, Want};
 use crate::privilege::Privilege;
-use crate::state::{Applied, Failed, Local, fingerprint};
+use crate::state::{Applied, Failed, Local};
 
 /// What to do before running a command that needs root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,17 +53,24 @@ pub fn apply(
             match a {
                 Action::Install(w) => installs.push((w, false)),
                 Action::Update(w) => installs.push((w, true)),
-                Action::Remove { logical, native } => removes.push(PkgSpec {
+                Action::Remove {
+                    logical,
+                    native,
+                    remove,
+                } => removes.push(PkgSpec {
                     logical: logical.clone(),
                     native: native.clone(),
-                    body: None,
+                    body: remove_spec(remove),
                 }),
                 Action::MarkApplied { logical, applied } => {
                     local.set_applied(section, logical, applied);
                     local.clear_failed(section, logical);
                 }
-                Action::Forget { logical } => {
+                Action::Forget { logical, note } => {
                     local.remove_applied(section, logical);
+                    if let Some(note) = note {
+                        app.ui.warn(format!("不再跟踪 {logical}：{note}"));
+                    }
                 }
                 Action::ClearFailed { logical } => {
                     local.clear_failed(section, logical);
@@ -90,6 +97,17 @@ pub fn apply(
             report.skipped += n;
             continue;
         }
+        // No root needed, but the commands still come from the repo: show and ask.
+        if adapter.needs_confirm()
+            && (!installs.is_empty() || !removes.is_empty())
+            && policy == RootPolicy::Confirm
+            && !app.dry_run
+            && let Err(why) = confirm_commands(app, adapter.as_ref(), &install_specs, &removes)?
+        {
+            app.ui.warn(format!("跳过 {n} 个 {id} 改动：{why}"));
+            report.skipped += n;
+            continue;
+        }
 
         let cx = app.ctx();
         let prev = local.applied(section);
@@ -109,7 +127,9 @@ pub fn apply(
                             manager: id,
                             native: w.native.clone(),
                             by_adopt,
-                            fp: w.body.as_ref().map(fingerprint),
+                            fp: w.fp.clone(),
+                            remove: w.remove.clone(),
+                            creates: w.creates.clone(),
                         },
                     );
                     local.clear_failed(section, &w.logical);
@@ -187,6 +207,37 @@ pub fn apply_and_follow_up(
     Ok((all, report))
 }
 
+/// A `{ remove = "..." }` table, as the script adapter reads it back.
+fn remove_spec(remove: &Option<String>) -> Option<toml_edit::Table> {
+    let cmd = remove.as_ref()?;
+    let mut t = toml_edit::Table::new();
+    t.insert(crate::state::entry::REMOVE, cmd.as_str().into());
+    Some(t)
+}
+
+/// Show the exact commands and ask once, for adapters whose commands deserve a look
+/// even without sudo.
+fn confirm_commands(
+    app: &App,
+    adapter: &dyn Adapter,
+    installs: &[PkgSpec],
+    removes: &[PkgSpec],
+) -> Result<std::result::Result<(), String>> {
+    let cmds = command_lines(app, adapter, installs, removes);
+    if cmds.is_empty() {
+        return Ok(Ok(()));
+    }
+    app.ui.line("将要执行：");
+    for c in &cmds {
+        app.ui.line(format!("  {}", app.ui.bold(c)));
+    }
+    if app.prompter.confirm("执行吗？", true)? {
+        Ok(Ok(()))
+    } else {
+        Ok(Err("你选择了不执行".into()))
+    }
+}
+
 /// Whether root changes may go ahead: privilege is available and, under
 /// [`RootPolicy::Confirm`], the user said yes to the exact commands. The inner
 /// error says why not; the outer one is Ctrl-C.
@@ -260,10 +311,14 @@ pub fn preview(app: &App, adapters: &[Box<dyn Adapter>], plan: &Plan) -> Vec<Str
                     native: w.native.clone(),
                     body: w.body.clone(),
                 }),
-                Action::Remove { logical, native } => removes.push(PkgSpec {
+                Action::Remove {
+                    logical,
+                    native,
+                    remove,
+                } => removes.push(PkgSpec {
                     logical: logical.clone(),
                     native: native.clone(),
-                    body: None,
+                    body: remove_spec(remove),
                 }),
                 _ => {}
             }

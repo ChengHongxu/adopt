@@ -67,8 +67,49 @@ impl App<'_> {
         }
     }
 
+    /// Every adapter usable here. `[script.*]` entries have to be read from the
+    /// manifests first: nothing else can tell adopt they exist.
     pub fn adapters(&self) -> Vec<Box<dyn Adapter>> {
-        adapters::detect(self.runner, &self.paths)
+        adapters::detect(self.runner, &self.paths, &self.script_entries())
+    }
+
+    /// `[script.*]` from both files; local comes last so it wins on a shared name.
+    fn script_entries(&self) -> Vec<crate::state::Entry> {
+        let mut out = Vec::new();
+        let Ok(local) = Local::load(&self.paths) else {
+            return out;
+        };
+        if let Some(repo) = local.repo()
+            && let Ok(shared) = Shared::load(&repo)
+        {
+            out.extend(
+                shared
+                    .entries(crate::model::Section::Script)
+                    .unwrap_or_default(),
+            );
+        }
+        out.extend(
+            local
+                .entries(crate::model::Section::Script)
+                .unwrap_or_default(),
+        );
+        // A script entry that left the manifest still has to be checked, or its removal
+        // could never be noticed: rebuild it from what was recorded when it was applied.
+        for (name, a) in local.applied(crate::model::Section::Script) {
+            if out.iter().any(|e| e.name == name) {
+                continue;
+            }
+            let mut e = crate::state::Entry::script(&name);
+            let body = e.body.get_or_insert_with(Default::default);
+            if let Some(c) = a.creates {
+                body.insert(crate::state::entry::CREATES, c.into());
+            }
+            if let Some(r) = a.remove {
+                body.insert(crate::state::entry::REMOVE, r.into());
+            }
+            out.push(e);
+        }
+        out
     }
 
     pub fn host(&self) -> String {

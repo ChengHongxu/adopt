@@ -23,8 +23,15 @@ pub struct Applied {
     pub native: String,
     /// adopt ran the install itself. Only these are removed when the shared entry goes away.
     pub by_adopt: bool,
-    /// Fingerprint of the entry's body as last applied: pixi env table, or npm `version`.
+    /// Fingerprint of the entry's body as last applied: pixi env table, npm `version`,
+    /// or a script's `install` command.
     pub fp: Option<String>,
+    /// Script: the `remove` command at the time of the last apply, so removing it later
+    /// does not need the manifest entry.
+    pub remove: Option<String>,
+    /// Script: the `creates` path, likewise: it is the only way to tell later whether
+    /// the software is still there.
+    pub creates: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +155,8 @@ impl Local {
                 native: t.get("native")?.as_str()?.to_string(),
                 by_adopt: t.get("by_adopt").and_then(Item::as_bool).unwrap_or(false),
                 fp: t.get("fp").and_then(Item::as_str).map(str::to_string),
+                remove: t.get("remove").and_then(Item::as_str).map(str::to_string),
+                creates: t.get("creates").and_then(Item::as_str).map(str::to_string),
             })
         })
     }
@@ -159,6 +168,12 @@ impl Local {
         t.insert("by_adopt", a.by_adopt.into());
         if let Some(fp) = &a.fp {
             t.insert("fp", fp.as_str().into());
+        }
+        if let Some(r) = &a.remove {
+            t.insert("remove", r.as_str().into());
+        }
+        if let Some(c) = &a.creates {
+            t.insert("creates", c.as_str().into());
         }
         self.section_table("applied", section)
             .insert(name, toml_edit::value(t));
@@ -255,8 +270,19 @@ mod tests {
             native: "htop".into(),
             by_adopt: true,
             fp: None,
+            remove: None,
+            creates: None,
         };
         l.set_applied(Section::System, "htop", &a);
+        let s = Applied {
+            manager: ManagerId::Script,
+            native: "magpie".into(),
+            by_adopt: true,
+            fp: Some("abc".into()),
+            remove: Some("rm -f ~/.local/bin/magpie".into()),
+            creates: Some("~/.local/bin/magpie".into()),
+        };
+        l.set_applied(Section::Script, "magpie", &s);
         let f = Failed {
             manager: ManagerId::Apt,
             native: "nope".into(),
@@ -276,6 +302,7 @@ mod tests {
         assert_eq!(l.baseline(ManagerId::Apt).unwrap().len(), 2);
         assert_eq!(l.baseline(ManagerId::Dnf), None);
         assert_eq!(l.applied(Section::System)["htop"], a);
+        assert_eq!(l.applied(Section::Script)["magpie"], s);
         assert_eq!(l.failed(Section::System)["nope"], f);
         let text = l.file.doc.to_string();
         assert!(text.contains("[applied.system]\nhtop = {"), "{text}");

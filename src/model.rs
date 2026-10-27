@@ -11,16 +11,25 @@ pub enum Section {
     Pixi,
     /// npm global packages (`npm install -g`).
     Npm,
+    /// Software installed by a command adopt runs (`curl ... | sh`), because no
+    /// package manager has it.
+    Script,
 }
 
 impl Section {
-    pub const ALL: [Section; 3] = [Section::System, Section::Pixi, Section::Npm];
+    pub const ALL: [Section; 4] = [
+        Section::System,
+        Section::Pixi,
+        Section::Npm,
+        Section::Script,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
             Section::System => "system",
             Section::Pixi => "pixi",
             Section::Npm => "npm",
+            Section::Script => "script",
         }
     }
 
@@ -42,15 +51,17 @@ pub enum ManagerId {
     Brew,
     Pixi,
     Npm,
+    Script,
 }
 
 impl ManagerId {
-    pub const ALL: [ManagerId; 5] = [
+    pub const ALL: [ManagerId; 6] = [
         ManagerId::Apt,
         ManagerId::Dnf,
         ManagerId::Brew,
         ManagerId::Pixi,
         ManagerId::Npm,
+        ManagerId::Script,
     ];
     /// Managers whose per-package name overrides may appear in a `[system.*]` entry.
     pub const SYSTEM: [ManagerId; 3] = [ManagerId::Apt, ManagerId::Dnf, ManagerId::Brew];
@@ -62,6 +73,7 @@ impl ManagerId {
             ManagerId::Brew => "brew",
             ManagerId::Pixi => "pixi",
             ManagerId::Npm => "npm",
+            ManagerId::Script => "script",
         }
     }
 
@@ -74,6 +86,7 @@ impl ManagerId {
             ManagerId::Apt | ManagerId::Dnf | ManagerId::Brew => Section::System,
             ManagerId::Pixi => Section::Pixi,
             ManagerId::Npm => Section::Npm,
+            ManagerId::Script => Section::Script,
         }
     }
 }

@@ -22,6 +22,8 @@ const TEMPLATE: &str = "\
 #   groups = [\"work\"]   只装到这些分组的机器（不写就是所有机器）
 # [pixi.<env>]         pixi global 环境，原样保存 pixi-global.toml 里的表
 # [npm.\"<包名>\"]       npm 全局包，带 scope 的名字要加引号；可写 version = \"^1.1\"
+# [script.<名字>]      没有包管理器可用的软件：creates 判断是否已装，install 是安装命令
+#   remove = \"...\"      可选，从清单删掉时用
 
 version = 1
 ";

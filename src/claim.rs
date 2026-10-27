@@ -286,6 +286,8 @@ fn entry_for(item: &NewItem) -> Entry {
         Section::System => Entry::system(&item.native),
         // Claimed unpinned: the user decides later whether a version is worth pinning.
         Section::Npm => Entry::npm(&item.native),
+        // Script entries are never auto-detected, so nothing is ever claimed here.
+        Section::Script => Entry::script(&item.native),
     }
 }
 
@@ -294,7 +296,9 @@ fn mark_applied(local: &mut Local, item: &NewItem) {
         manager: item.manager,
         native: item.native.clone(),
         by_adopt: false,
-        fp: entry_for(item).body.as_ref().map(fingerprint),
+        fp: entry_for(item).fingerprint(),
+        remove: None,
+        creates: None,
     };
     local.set_applied(item.section(), &item.native, &applied);
 }
@@ -580,6 +584,8 @@ pub fn claim_drift(
                         native: want.native.clone(),
                         by_adopt,
                         fp: Some(fingerprint(current)),
+                        remove: None,
+                        creates: None,
                     },
                 );
             }

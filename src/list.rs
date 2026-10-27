@@ -57,6 +57,9 @@ fn row(e: &Entry, manager: Option<crate::model::ManagerId>, origin: &str, note: 
     if let Some(v) = e.version() {
         cols.push(format!("version {v}"));
     }
+    if let Some(c) = e.creates() {
+        cols.push(format!("creates {c}"));
+    }
     if let Some(m) = manager.filter(|m| m.section() == crate::model::Section::System) {
         match e.native_for(m) {
             Some(n) if n != e.name => cols.push(format!("{m}: {n}")),

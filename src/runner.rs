@@ -12,6 +12,8 @@ pub struct Cmd {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// Working directory; `None` inherits adopt's. Shown nowhere in `Display`.
+    pub cwd: Option<PathBuf>,
 }
 
 impl Cmd {
@@ -20,6 +22,7 @@ impl Cmd {
             program: program.into(),
             args: Vec::new(),
             env: Vec::new(),
+            cwd: None,
         }
     }
 
@@ -39,6 +42,11 @@ impl Cmd {
 
     pub fn env(mut self, k: impl Into<String>, v: impl Into<String>) -> Cmd {
         self.env.push((k.into(), v.into()));
+        self
+    }
+
+    pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Cmd {
+        self.cwd = Some(dir.into());
         self
     }
 
@@ -166,6 +174,9 @@ impl SystemRunner {
     fn command(cmd: &Cmd) -> Command {
         let mut c = Command::new(&cmd.program);
         c.args(&cmd.args);
+        if let Some(dir) = &cmd.cwd {
+            c.current_dir(dir);
+        }
         for (k, v) in &cmd.env {
             c.env(k, v);
         }

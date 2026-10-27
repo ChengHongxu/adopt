@@ -82,12 +82,17 @@ impl Paths {
         }
     }
 
-    /// Expand a leading `~/` typed by the user.
+    /// Expand a leading `~/`, `$HOME/` or `${HOME}/` typed by the user (`~` and
+    /// `$HOME` alone work too). Anything else is taken as written.
     pub fn expand(&self, s: &str) -> PathBuf {
-        match s.strip_prefix("~/") {
-            Some(rest) => self.home.join(rest),
-            None if s == "~" => self.home.clone(),
-            None => PathBuf::from(s),
+        if s == "~" || s == "$HOME" || s == "${HOME}" {
+            return self.home.clone();
         }
+        for prefix in ["~/", "$HOME/", "${HOME}/"] {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                return self.home.join(rest);
+            }
+        }
+        PathBuf::from(s)
     }
 }

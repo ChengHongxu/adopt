@@ -122,8 +122,15 @@ pub enum Origin {
 pub struct Want {
     pub logical: String,
     pub native: String,
-    /// Pixi: the env table to write.
+    /// Pixi: the env table to write. Script: `install`, `remove`.
     pub body: Option<Table>,
+    /// What "the entry changed since the last apply" compares: pixi's table, npm's
+    /// `version`, a script's `install`.
+    pub fp: Option<String>,
+    /// Script: the command that undoes the install and the path it leaves behind, kept
+    /// so a later run can still use them after the entry has left the manifest.
+    pub remove: Option<String>,
+    pub creates: Option<String>,
     pub origin: Origin,
 }
 
@@ -137,6 +144,8 @@ pub enum Action {
     Remove {
         logical: String,
         native: String,
+        /// Script: the `remove` command recorded at install time.
+        remove: Option<String>,
     },
     /// Bookkeeping only: record that this package is in place.
     MarkApplied {
@@ -146,6 +155,8 @@ pub enum Action {
     /// Bookkeeping only: no longer wanted; leave the package itself alone.
     Forget {
         logical: String,
+        /// Why nothing is uninstalled, when the user needs to know.
+        note: Option<String>,
     },
     ClearFailed {
         logical: String,
@@ -215,12 +226,18 @@ pub fn desired(
         .map(|e| (e, Origin::Local));
     for (e, origin) in shared_entries.chain(local_entries) {
         if let Some(native) = e.native_for(manager) {
+            let fp = e.fingerprint();
+            let remove = e.remove_cmd().map(str::to_string);
+            let creates = e.creates().map(str::to_string);
             out.insert(
                 e.name.clone(),
                 Want {
                     logical: e.name,
                     native,
                     body: e.body,
+                    fp,
+                    remove,
+                    creates,
                     origin,
                 },
             );
@@ -260,9 +277,11 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
                     native: w.native.clone(),
                     by_adopt,
                     fp,
+                    remove: w.remove.clone(),
+                    creates: w.creates.clone(),
                 },
             };
-            let want_fp = w.body.as_ref().map(fingerprint);
+            let want_fp = w.fp.clone();
             match (present, prev) {
                 // pixi: the machine keeps its own copy of the body (the env table).
                 (true, prev) if current.is_some() => {
@@ -289,7 +308,13 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
                 // Only a change there since the last apply counts, never what is
                 // installed, so a tool updating itself is not "corrected" back.
                 (true, prev) => match prev {
-                    Some(a) if a.native == w.native && a.fp == want_fp => {}
+                    // Same installer: nothing to run. An edited `remove` (or `creates`)
+                    // only refreshes the record, so it is there for a later removal.
+                    Some(a) if a.native == w.native && a.fp == want_fp => {
+                        if a.remove != w.remove || a.creates != w.creates {
+                            act(mark(a.by_adopt, want_fp));
+                        }
+                    }
                     Some(a) if a.native == w.native && a.fp.is_some() => {
                         act(Action::Update(w.clone()));
                     }
@@ -317,13 +342,23 @@ pub fn reconcile(shared: &Shared, local: &Local, inv: &Inventory) -> Result<Plan
             }
             if a.by_adopt && (installed.names.contains(&a.native) || untracked(manager, &a.native))
             {
-                act(Action::Remove {
-                    logical: logical.clone(),
-                    native: a.native.clone(),
-                });
+                // A script without a `remove` command can only be forgotten; say so.
+                if manager == ManagerId::Script && a.remove.is_none() {
+                    act(Action::Forget {
+                        logical: logical.clone(),
+                        note: Some("条目没有 remove 命令，需要手动清理".into()),
+                    });
+                } else {
+                    act(Action::Remove {
+                        logical: logical.clone(),
+                        native: a.native.clone(),
+                        remove: a.remove.clone(),
+                    });
+                }
             } else {
                 act(Action::Forget {
                     logical: logical.clone(),
+                    note: None,
                 });
             }
         }
@@ -394,6 +429,8 @@ mod tests {
                 native: name.into(),
                 by_adopt,
                 fp: None,
+                remove: None,
+                creates: None,
             },
         );
     }
@@ -409,7 +446,10 @@ mod tests {
                 Action::MarkApplied { logical, applied } => {
                     format!("mark {logical} by_adopt={}", applied.by_adopt)
                 }
-                Action::Forget { logical } => format!("forget {logical}"),
+                Action::Forget { logical, note } => match note {
+                    Some(n) => format!("forget {logical} ({n})"),
+                    None => format!("forget {logical}"),
+                },
                 Action::ClearFailed { logical } => format!("clear {logical}"),
             })
             .collect();
@@ -543,6 +583,8 @@ mod tests {
                 native: "rg".into(),
                 by_adopt: true,
                 fp: Some(fingerprint(&t)),
+                remove: None,
+                creates: None,
             },
         );
     }
@@ -603,6 +645,8 @@ mod tests {
                 native: name.into(),
                 by_adopt: true,
                 fp,
+                remove: None,
+                creates: None,
             },
         );
     }

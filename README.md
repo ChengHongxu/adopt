@@ -19,7 +19,7 @@ $ adopt
 
 平时照常用 `apt install`、`dnf install`、`brew install`、`pixi global install`、`npm install -g` 装软件，不需要任何包装命令，也不用事先决定要不要同步。adopt 对比"本机实际装了什么"和"清单里有什么"，把差异列出来让你一次分好类，然后自动提交并推送。其他机器用 `adopt sync --yes` 拉取并应用。
 
-支持的包管理器：apt、dnf（dnf4 和 dnf5）、Homebrew（formula，暂不支持 cask）、pixi global、npm 全局包。每台机器只用一个系统包管理器，按 apt、dnf、brew 的顺序选；应用时先系统包，再 pixi，最后 npm（node 通常由 pixi 提供）。
+支持的包管理器：apt、dnf（dnf4 和 dnf5）、Homebrew（formula，暂不支持 cask）、pixi global、npm 全局包。没有包管理器可用的软件（官方只给 `curl | sh` 安装脚本的那种）写成 `[script.*]` 条目，用你写的命令安装。每台机器只用一个系统包管理器，按 apt、dnf、brew 的顺序选；应用时先系统包，再 pixi，再 npm（node 通常由 pixi 提供），最后 script（安装命令可能要用前面装好的 curl、node）。
 
 ## 安装
 
@@ -89,6 +89,9 @@ adopt sync --yes
 - npm 包：adopt 从不主动升级。只有清单里这个条目的 `version` 变了（相对上次应用时），才执行一次 `npm install -g 名字@新version`；已装版本和 `version` 不一致不算改动，所以 Claude Code 这类会自我更新的工具，以及 `npm update -g`，都不会被改回去
 - npm prefix 不合适（在 pixi 环境里，或不可写）：这些 npm 条目记为失败并给出提示，不用 sudo，其他条目照常应用
 - 同一次运行中新出现的包管理器：比如新机器上 pixi 刚装好 nodejs，`npm` 才可用。apply 完会重新检测，对新出现的包管理器再做一轮，npm 条目在同一次 sync 里就装上
+- script 条目：`creates` 指向的路径存在就算已装。只有 `install` 字符串变了（相对上次应用时）才重新执行一次；软件自己升级、或者你手动升级，都不算改动
+- script 条目从清单删掉：只有当初是 adopt 装的、并且条目写了 `remove`，才执行 `remove`；否则只是不再跟踪，并提示你手动清理
+- script 命令返回 0 但 `creates` 不存在：算安装失败，提示 `creates` 可能写错了
 - 拿不到 sudo：跳过系统包并给出提示，pixi 照常应用，不报错退出
 - pull 失败：给出警告，用本地的清单继续
 - push 被拒：先 `pull --rebase` 再推；还失败就停下来，提交留在本地，绝不强推
@@ -124,9 +127,23 @@ exposed = { node = "node", npm = "npm", npx = "npx" }
 [npm.pyright]
 version = "^1.1"                    # 可选，npm 的 semver 范围；不写就是 latest
 groups = ["work"]
+
+[script.magpie]                     # 没有包管理器可用的软件
+creates = "~/.local/bin/magpie"     # 必填：这个路径存在就算已装（只 stat，不启动进程）
+install = "curl -fsSL https://usemagpie.ai/install.sh | sh"   # 必填
+remove = "rm -f ~/.local/bin/magpie"                          # 可选
+groups = ["work"]
 ```
 
 npm 条目只认 `version` 和 `groups`，名字原样使用 `npm ls -g` 里的包名，不做名字映射。认领手动装的包时写成空表，不锁版本。
+
+### script 条目
+
+script 条目只认 `creates`、`install`、`remove` 和 `groups`。`creates` 里的 `~` 和 `${HOME}` 会展开。命令用 `sh -c` 执行，工作目录是 HOME，继承 adopt 的环境，从不加 sudo；每个条目单独执行，一个失败不影响其他。
+
+adopt 发现不了脚本装的软件，所以 script 条目不会出现在认领列表里，只能手写进 `packages.toml`（或 `local.toml` 的 `[local.script.*]`）。
+
+**安全**：有了 script 条目，`packages.toml` 里就有了会在每台机器上执行的命令，`adopt sync --yes`（包括定时器和 cron）会直接执行它们。这和 chezmoi 的 `run_` 脚本是同一级别的信任：能往 dotfiles 仓库推送的人，本来就能通过 `chezmoi apply` 在每台机器上执行代码。交互模式下，adopt 执行 script 命令前会完整显示命令并确认（第一次安装、`install` 变化后重装、执行 `remove` 都会问）；`--dry-run` 只打印命令。只往清单里写你信得过的命令。
 
 ### npm 的全局 prefix
 
@@ -148,7 +165,7 @@ prefix=${HOME}/.local
 
 ## 提示符（starship）
 
-`adopt status --prompt` 用缓存：只比较两份清单的内容和几个系统文件（`/var/lib/dpkg/status`、rpm 数据库、brew 的 Cellar、pixi 清单、npm 的 `node_modules`）的修改时间和大小，有变化才调用包管理器重新计算。缓存命中时不启动任何进程。
+`adopt status --prompt` 用缓存：只比较两份清单的内容和几个系统文件（`/var/lib/dpkg/status`、rpm 数据库、brew 的 Cellar、pixi 清单、npm 的 `node_modules`、每个 script 条目的 `creates` 路径）的修改时间和大小，有变化才调用包管理器重新计算。缓存命中时不启动任何进程。
 
 npm 的 prefix 不启动 node 来取（那要几百毫秒）：依次看 `NPM_CONFIG_PREFIX`、`~/.npmrc` 里的 `prefix=`（展开 `~` 和 `${HOME}`），最后是上次运行 `npm ls -g` 时记下的 prefix（`~/.cache/adopt/npm-prefix`）。都拿不到就不监视 npm。监视的是 `<prefix>/lib/node_modules` 和其下每个 `@scope` 目录：往已有的 scope 里再装一个包时，只有 scope 目录的修改时间会变。
 
@@ -209,7 +226,7 @@ runcmd:
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-测试不会碰本机真实的 `~/.pixi`、npm prefix、系统软件或 chezmoi 目录：所有外部命令都经过 `CommandRunner` trait，测试里换成模拟 apt/dnf/brew/pixi/npm/chezmoi 的假实现，HOME 和 dotfiles 仓库都在临时目录里。git 是真实执行的，但用的是临时目录里的仓库和隔离的配置。
+测试不会碰本机真实的 `~/.pixi`、`~/.local/bin`、npm prefix、系统软件或 chezmoi 目录，也不执行真实的安装脚本：所有外部命令都经过 `CommandRunner` trait，测试里换成模拟 apt/dnf/brew/pixi/npm/chezmoi 和 `sh -c` 的假实现，HOME 和 dotfiles 仓库都在临时目录里。git 是真实执行的，但用的是临时目录里的仓库和隔离的配置。
 
 `tests/e2e/run.sh` 在 Docker 容器里用真实的 apt 或 dnf 跑一遍 init、认领检测和 sync 的三条规则。CI 在 debian:stable、fedora:latest（dnf5）、rockylinux:9（dnf4）里跑它。它会真实装卸软件，只能在一次性容器里运行：
 

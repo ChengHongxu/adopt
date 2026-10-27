@@ -6,6 +6,7 @@ pub mod brew;
 pub mod dnf;
 pub mod npm;
 pub mod pixi;
+pub mod script;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -42,6 +43,7 @@ pub struct PkgSpec {
     /// Name this manager knows it by.
     pub native: String,
     /// Pixi: the env table to write. Npm: the entry's `version`, if any.
+    /// Script: `install` (and `remove`, when adopting an entry that has one).
     pub body: Option<Table>,
 }
 
@@ -69,6 +71,13 @@ pub trait Adapter {
     /// Whether install/remove need root (they get wrapped in sudo).
     fn needs_root(&self) -> bool;
 
+    /// Whether an interactive run shows the commands and asks before running them even
+    /// without sudo (root adapters already ask in the sudo step): a script entry runs
+    /// arbitrary shell from the repo.
+    fn needs_confirm(&self) -> bool {
+        false
+    }
+
     /// Whether `adopt init` should record what is installed now as the baseline.
     fn baseline_on_init(&self) -> bool {
         false
@@ -95,10 +104,15 @@ pub trait Adapter {
 }
 
 /// The adapters usable on this machine: at most one system manager (apt, then dnf,
-/// then brew, so Linuxbrew next to apt does not take over), then pixi, then npm.
-/// The order is also the apply order: npm comes last because node usually comes
-/// from pixi.
-pub fn detect(runner: &dyn CommandRunner, paths: &Paths) -> Vec<Box<dyn Adapter>> {
+/// then brew, so Linuxbrew next to apt does not take over), then pixi, then npm, then
+/// script (whose installers may need curl or node). The order is also the apply order.
+/// `scripts` is the `[script.*]` entries of both manifests, since those are only known
+/// from the manifest itself.
+pub fn detect(
+    runner: &dyn CommandRunner,
+    paths: &Paths,
+    scripts: &[crate::state::Entry],
+) -> Vec<Box<dyn Adapter>> {
     let system: Vec<Box<dyn Adapter>> = vec![
         Box::new(apt::Apt),
         Box::new(dnf::Dnf::new()),
@@ -116,6 +130,10 @@ pub fn detect(runner: &dyn CommandRunner, paths: &Paths) -> Vec<Box<dyn Adapter>
     let npm = npm::Npm::new();
     if npm.is_available(runner) {
         out.push(Box::new(npm));
+    }
+    let script = script::Script::new(scripts.to_vec());
+    if script.is_available(runner) {
+        out.push(Box::new(script));
     }
     out
 }

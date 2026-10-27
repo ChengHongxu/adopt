@@ -1,5 +1,6 @@
-//! One package entry, as written under `[system.<name>]`, `[pixi.<name>]` or
-//! `[npm.<name>]` in packages.toml, or under `[local.system.<name>]` in local.toml.
+//! One package entry, as written under `[system.<name>]`, `[pixi.<name>]`,
+//! `[npm.<name>]` or `[script.<name>]` in packages.toml, or under
+//! `[local.system.<name>]` in local.toml.
 
 use std::collections::BTreeMap;
 
@@ -13,6 +14,12 @@ use crate::model::{ManagerId, Section};
 pub const GROUPS: &str = "groups";
 /// Npm: the semver range to install (`npm install -g name@<version>`).
 pub const VERSION: &str = "version";
+/// Script: the path that exists once the software is installed. Checked with `stat`.
+pub const CREATES: &str = "creates";
+/// Script: the command that installs it.
+pub const INSTALL: &str = "install";
+/// Script: the command that removes it. Optional.
+pub const REMOVE: &str = "remove";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mapping {
@@ -33,6 +40,7 @@ pub struct Entry {
     pub mappings: BTreeMap<ManagerId, Mapping>,
     /// Pixi: the env table exactly as pixi writes it, minus `groups`.
     /// Npm: a table holding only `version`, if the entry pins one.
+    /// Script: `creates`, `install`, and `remove` when given.
     pub body: Option<Table>,
 }
 
@@ -68,9 +76,57 @@ impl Entry {
         }
     }
 
+    /// Script: a bare entry; adopt fills in the commands later.
+    pub fn script(name: &str) -> Entry {
+        Entry {
+            section: Section::Script,
+            name: name.into(),
+            groups: None,
+            mappings: BTreeMap::new(),
+            body: Some(Table::new()),
+        }
+    }
+
     /// Npm: the pinned semver range.
     pub fn version(&self) -> Option<&str> {
         self.body.as_ref()?.get(VERSION)?.as_str()
+    }
+
+    fn body_str(&self, key: &str) -> Option<&str> {
+        self.body.as_ref()?.get(key)?.as_str()
+    }
+
+    /// Script: where the software ends up.
+    pub fn creates(&self) -> Option<&str> {
+        self.body_str(CREATES)
+    }
+
+    /// Script: the install command.
+    pub fn install_cmd(&self) -> Option<&str> {
+        self.body_str(INSTALL)
+    }
+
+    /// Script: the remove command, if the entry has one.
+    pub fn remove_cmd(&self) -> Option<&str> {
+        self.body_str(REMOVE)
+    }
+
+    /// What a change in this entry looks like, for `[applied.*] fp`: the pixi env table,
+    /// npm's `version`, or a script's `install` alone (editing `creates` or `remove`
+    /// must not rerun the installer).
+    pub fn fingerprint(&self) -> Option<String> {
+        let body = self.body.as_ref()?;
+        let t = match self.section {
+            Section::Script => {
+                let mut t = Table::new();
+                if let Some(cmd) = self.install_cmd() {
+                    t.insert(INSTALL, Item::Value(Value::from(cmd)));
+                }
+                t
+            }
+            _ => body.clone(),
+        };
+        Some(super::fingerprint(&t))
     }
 
     pub fn with_groups(mut self, groups: Option<Vec<String>>) -> Entry {
@@ -146,6 +202,42 @@ impl Entry {
                             ),
                         },
                         other => bail!("[npm.{name}] 不支持 {other}，只能写 version 和 groups"),
+                    }
+                }
+                entry.body = Some(body);
+            }
+            Section::Script => {
+                let mut body = Table::new();
+                for (k, v) in table.iter() {
+                    let slot = match k {
+                        GROUPS => continue,
+                        CREATES | INSTALL | REMOVE => k,
+                        other => bail!(
+                            "[script.{name}] 不支持 {other}，只能写 creates、install、remove 和 groups"
+                        ),
+                    };
+                    // `remove` is the only optional one.
+                    match v.as_str().map(str::trim) {
+                        Some(cmd) if !cmd.is_empty() => {
+                            body.insert(slot, Item::Value(Value::from(cmd)));
+                        }
+                        _ if slot == REMOVE => {
+                            bail!("[script.{name}] 的 remove 必须是非空字符串，不要的话整行删掉")
+                        }
+                        _ => bail!(
+                            "[script.{name}] 的 {slot} 必须是非空字符串，例如 {slot} = \"...\""
+                        ),
+                    }
+                }
+                for (slot, hint) in [
+                    (CREATES, "例如 creates = \"~/.local/bin/mytool\""),
+                    (
+                        INSTALL,
+                        "例如 install = \"curl -fsSL https://example.com/install.sh | sh\"",
+                    ),
+                ] {
+                    if !body.contains_key(slot) {
+                        bail!("[script.{name}] 缺少 {slot}，{hint}");
                     }
                 }
                 entry.body = Some(body);
